@@ -20,7 +20,7 @@ from folium.elements import JSCSSMixin
 from folium.template import Template
 from streamlit_folium import st_folium
 
-from streeto_planner import distances, oom
+from streeto_planner import distances, maprun, oom
 from streeto_planner.solve import solve
 
 load_dotenv()
@@ -212,6 +212,17 @@ def _geometry(map_id: str, visit_numbers: tuple[str, ...]) -> dict:
     return distances.route_geometry(waypoints)
 
 
+@st.cache_data(show_spinner="Fetching MapRun results...", ttl=600)
+def _maprun_results(event_name: str) -> list[maprun.Result]:
+    """Cached wrapper around maprun.fetch_results.
+
+    MapRun's API asks for "reasonable use" -- no faster than one call every
+    10 seconds, and not for bulk/every event -- so this is cached rather
+    than refetched on every rerun a selectbox interaction triggers.
+    """
+    return maprun.fetch_results(event_name)
+
+
 def _build_map(
     course: oom.Course,
     route,
@@ -388,6 +399,7 @@ def main() -> None:
             "map_id": map_id,
             "course": course,
             "route": route,
+            "matrix": matrix,
             "caveat": caveat,
             "warnings": warnings,
             "unbounded": budget == math.inf,
@@ -440,6 +452,105 @@ def main() -> None:
 
     fmap = _build_map(course, route, result["map_id"], result["show_real_map"])
     st_folium(fmap, width=None, height=650, returned_objects=[])
+
+    _render_maprun_comparison(course, result)
+
+
+def _render_maprun_comparison(course: oom.Course, result: dict) -> None:
+    """A section comparing a real MapRun runner's result against the solver."""
+    st.divider()
+    st.subheader("Compare with a real MapRun result")
+
+    known_maps = _load_known_maps()
+    known_entry = next((m for m in known_maps if m["id"] == result["map_id"]), None)
+    default_event_name = (known_entry or {}).get("maprun_event", "")
+
+    event_name = st.text_input(
+        "MapRun event name",
+        value=default_event_name,
+        placeholder="e.g. Cobham Mar26 PXAS ScoreQ60",
+    )
+    if st.button("Fetch MapRun results"):
+        if not event_name.strip():
+            st.error("Enter a MapRun event name.")
+        else:
+            try:
+                fetched = _maprun_results(event_name.strip())
+            except (LookupError, ValueError, OSError) as error:
+                st.error(str(error))
+            else:
+                st.session_state["maprun"] = {
+                    "event_name": event_name.strip(),
+                    "results": fetched,
+                }
+
+    maprun_state = st.session_state.get("maprun")
+    if not maprun_state or maprun_state["event_name"] != event_name.strip():
+        return
+
+    entries = maprun_state["results"]
+    if not entries:
+        st.warning("No results found for that event name.")
+        return
+
+    ordered = sorted(entries, key=lambda r: (r.classifier != "OK", -r.gross_score))
+
+    def _label(i: int) -> str:
+        r = ordered[i]
+        return (
+            f"{r.name} — {r.classifier} — {r.distance_km:.2f}km — "
+            f"{r.gross_score}pts — {r.total_time_hhmmss}"
+        )
+
+    chosen_index = st.selectbox(
+        "Runner", range(len(ordered)), format_func=_label
+    )
+    chosen = ordered[chosen_index]
+
+    if chosen.distance_km <= 0:
+        st.info("This result has no usable distance to compare against.")
+        return
+
+    solver_route = solve(
+        course.nodes, result["matrix"], chosen.distance_km * 1000,
+        iterations=60, seed=0,
+    )
+
+    course_control_numbers = {c.number for c in course.controls}
+    their_controls = set(chosen.visits) & course_control_numbers
+    our_controls = {c.number for c in solver_route.controls}
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(
+            f"{chosen.name}'s actual score",
+            chosen.gross_score,
+            help=f"{chosen.distance_km:.2f}km in {chosen.total_time_hhmmss}, "
+                 f"{len(their_controls)} controls",
+        )
+    with col2:
+        st.metric(
+            "Solver's score at the same distance",
+            solver_route.points,
+            delta=solver_route.points - chosen.gross_score,
+            help=f"{round(solver_route.distance)}m, "
+                 f"{len(solver_route.controls)} controls",
+        )
+
+    missed_by_solver = sorted(their_controls - our_controls, key=int)
+    missed_by_runner = sorted(our_controls - their_controls, key=int)
+    if missed_by_solver:
+        st.write(
+            "Controls they got that the solver's route skips: "
+            + ", ".join(missed_by_solver)
+        )
+    if missed_by_runner:
+        st.write(
+            "Controls the solver's route adds that they didn't get: "
+            + ", ".join(missed_by_runner)
+        )
+    if not missed_by_solver and not missed_by_runner:
+        st.write("Same set of controls, just possibly a different order.")
 
 
 main()

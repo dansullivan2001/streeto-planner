@@ -71,6 +71,19 @@ password if set (leave blank for local use). Deployed to
 [Streamlit Community Cloud](https://streamlit.io/cloud), the same variable
 names go in that app's *Secrets* settings instead of `.env`.
 
+The map picker remembers every map ID solved successfully, in `known_maps.json`,
+so past events build up into a dropdown instead of needing to be retyped.
+
+If a course was also run as a MapRun event, entering its event name (or
+letting it prefill from `known_maps.json`'s `maprun_event` field) pulls real
+results from [MapRun's public results API](https://maprunners.weebly.com/access-to-results.html)
+and compares a chosen runner's actual score and distance against what the
+solver finds for that same distance budget, control by control. That API has
+no GPS trace data — only each runner's score, distance, time and the order
+they punched controls — and asks for "reasonable use" (no more than one call
+every 10 seconds, not bulk-fetching every event), which the app respects by
+caching rather than refetching on every interaction.
+
 ## How it works
 
 **Read the corner, not the controls.** Every OpenOrienteeringMap sheet prints
