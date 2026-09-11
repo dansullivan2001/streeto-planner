@@ -10,13 +10,19 @@ salesman who is allowed to skip stops, and paid for the ones he keeps.
 ## Status
 
 Early. The course reader, the route solver and the map-ID recovery all work from
-the command line. There is no web front end yet, and distances are approximated
+the command line and from a Streamlit web app. Distances are approximated
 unless you supply a routing key.
 
 ## Install
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+```
+
+For the web app, add the `streamlit` extra:
+
+```bash
+.venv/bin/pip install -e ".[streamlit]"
 ```
 
 ## Use
@@ -45,6 +51,25 @@ Recover an ID you could not quite read, marking the uncertain characters:
 ```bash
 .venv/bin/streeto resolve '698d11dd[9g]c78c'
 ```
+
+## Web app
+
+```bash
+.venv/bin/streamlit run streamlit_app.py
+```
+
+Enter a map ID and a distance budget, or leave the budget blank to plan the
+optimum route through every control. The map shows the real routed path (not
+just straight lines between stops), control numbers, the printed sheet's
+actual boundary, and — toggleable — OOM's own rendered map image (the one
+with the purple control circles), draped over real geography at its true
+position and rotation.
+
+Copy `.env.example` to `.env` and fill in the keys you have; the same file
+also holds `STREETO_APP_PASSWORD`, which gates the whole app behind a shared
+password if set (leave blank for local use). Deployed to
+[Streamlit Community Cloud](https://streamlit.io/cloud), the same variable
+names go in that app's *Secrets* settings instead of `.env`.
 
 ## How it works
 
@@ -94,13 +119,14 @@ small budgets, but it is honest: it never claims optimality it has not proven.
   runner's pace. That is the next thing worth fixing.
 - Terrain is ignored. On a map with contours, hills cost time that a distance
   budget cannot see.
-- A route can be routed outside the printed map's boundary. OOM's metadata
-  (`papersize`, `rotation`) would in principle let us compute that boundary
-  exactly, but its rotation convention is undocumented and untested here — a
-  hard geofence built on a guess could silently reject valid legs or admit
-  invalid ones with false confidence. The web app instead flags a route if it
-  strays well outside a padded box around the course's own controls, which
-  catches a wild excursion but is not a precise check.
+- A route can be routed outside the printed map's boundary. OOM's `rotation`
+  field has no documented sign convention, so it's derived per course by
+  testing both signs against that course's own controls — which must lie
+  inside the printed sheet by construction — and using whichever one actually
+  contains them (validated against a real course; see `course_boundary` in
+  `distances.py`). This is a warning, not a hard block: if a future course
+  doesn't fit either sign, it falls back to a looser box around the course's
+  own controls rather than trust a boundary it can't confirm.
 - Some controls sit at points OSM has no nearby mapped footpath for (inside a
   garden, on a driveway), so OpenRouteService silently snaps them to whatever
   routable point it can find, however far away, corrupting the distances that
@@ -111,7 +137,9 @@ small budgets, but it is honest: it never claims optimality it has not proven.
 
 Inspired by [pbatch/StreetoSolver](https://github.com/pbatch/StreetoSolver),
 which solves the same problem with a precomputed static site. That is a separate
-project and none of its code is used here.
+project and none of its code is used here, though `oom.render_image_url`'s
+request to OOM's map-image renderer was worked out by reading how that
+project's `pull_map.py` builds the same request.
 
 Course data comes from [OpenOrienteeringMap](https://oomap.co.uk/), created by
 Oliver O'Brien, with OOM v4 developed by David Dixon. Map data is
