@@ -127,11 +127,18 @@ small budgets, but it is honest: it never claims optimality it has not proven.
   `distances.py`). This is a warning, not a hard block: if a future course
   doesn't fit either sign, it falls back to a looser box around the course's
   own controls rather than trust a boundary it can't confirm.
-- Some controls sit at points OSM has no nearby mapped footpath for (inside a
-  garden, on a driveway), so OpenRouteService silently snaps them to whatever
-  routable point it can find, however far away, corrupting the distances that
-  touch them. `solve --routed` and the web app flag any control snapped more
-  than 50m from its real position.
+- Some controls sit near roads OpenStreetMap tags `access=private` with no
+  `foot=yes`/`foot=permissive` override (common in Cobham's gated estate
+  roads) — real, walkable roads that OpenRouteService's foot profile excludes
+  anyway, since it can't assume pedestrian access just because vehicle access
+  is restricted. It searches outward for the nearest road it's sure permits
+  pedestrians, which can be over 100m away, corrupting the distances that
+  touch that control. `solve --routed` and the app flag any control snapped
+  more than 50m from its real position, and replace distances touching it
+  with the straight-line approximation rather than trust the corrupted
+  number (see `_patch_unreliable_legs` in `distances.py`). There's no
+  request-level API option to override this; the real fix is upstream, in
+  OpenStreetMap's own tagging.
 
 ## Credits
 

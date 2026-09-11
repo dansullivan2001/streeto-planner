@@ -8,11 +8,14 @@ import pytest
 from conftest import METRES_PER_DEGREE_LAT, control
 
 from streeto_planner.distances import (
+    SnapWarning,
     _best_bearing,
     _overshoot,
+    _patch_unreliable_legs,
     approximate_matrix,
     course_boundary,
     detour_index,
+    geometry_snap_warnings,
     haversine,
     route_strays_outside_course,
 )
@@ -178,3 +181,71 @@ def test_route_strays_outside_course_accepts_points_within_the_sheet() -> None:
         ]
     }
     assert route_strays_outside_course(on_sheet, course) is False
+
+
+def test_geometry_snap_warnings_flags_a_control_landed_far_away() -> None:
+    start = control("S", 0, 0)
+    target = control("46", 200, 40)
+    landed_far = control("_", 320, 0)  # 120m further north than requested
+    geometry = {
+        "features": [
+            {
+                "properties": {"way_points": [0, 1]},
+                "geometry": {
+                    "coordinates": [
+                        [start.longitude, start.latitude],
+                        [landed_far.longitude, landed_far.latitude],
+                    ]
+                },
+            }
+        ]
+    }
+    warnings = geometry_snap_warnings(geometry, [start, target])
+    assert len(warnings) == 1
+    assert warnings[0].number == "46"
+    assert warnings[0].snapped_distance == pytest.approx(120, rel=0.02)
+
+
+def test_geometry_snap_warnings_ignores_a_close_snap() -> None:
+    start = control("S", 0, 0)
+    target = control("46", 200, 40)
+    landed_close = control("_", 210, 0)  # only 10m off, under the threshold
+    geometry = {
+        "features": [
+            {
+                "properties": {"way_points": [0, 1]},
+                "geometry": {
+                    "coordinates": [
+                        [start.longitude, start.latitude],
+                        [landed_close.longitude, landed_close.latitude],
+                    ]
+                },
+            }
+        ]
+    }
+    assert geometry_snap_warnings(geometry, [start, target]) == []
+
+
+def test_patch_unreliable_legs_replaces_distances_touching_a_flagged_control() -> None:
+    nodes = [control("S", 0, 30), control("A", 500, 30), control("B", 1200, 50)]
+    # A bogus "shortcut" -- as if A snapped onto B's nearby routable point.
+    matrix = [
+        [0.0, 500.0, 1200.0],
+        [500.0, 0.0, 5.0],
+        [1200.0, 5.0, 0.0],
+    ]
+    _patch_unreliable_legs(nodes, matrix, [SnapWarning("A", 150.0)], detour=1.0)
+
+    # Legs touching the flagged control (A, index 1) are replaced...
+    assert matrix[1][2] == pytest.approx(haversine(nodes[1], nodes[2]))
+    assert matrix[2][1] == pytest.approx(haversine(nodes[1], nodes[2]))
+    assert matrix[0][1] == pytest.approx(haversine(nodes[0], nodes[1]))
+    # ...but a leg between two unflagged controls is left untouched.
+    assert matrix[0][2] == 1200.0
+
+
+def test_patch_unreliable_legs_does_nothing_without_warnings() -> None:
+    nodes = [control("S", 0, 30), control("A", 500, 30)]
+    matrix = [[0.0, 40.0], [40.0, 0.0]]
+    _patch_unreliable_legs(nodes, matrix, [])
+    assert matrix == [[0.0, 40.0], [40.0, 0.0]]

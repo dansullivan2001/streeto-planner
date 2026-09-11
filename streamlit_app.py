@@ -7,8 +7,11 @@ also work from a local .env for development) -- see README.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import math
 import os
+from pathlib import Path
 
 import folium
 import streamlit as st
@@ -21,6 +24,33 @@ from streeto_planner import distances, oom
 from streeto_planner.solve import solve
 
 load_dotenv()
+
+
+def _bridge_secrets_into_environ() -> None:
+    """Make st.secrets (Streamlit Cloud's secrets store) reach os.environ.
+
+    distances.py and oom.py are framework-agnostic and read plain
+    environment variables, so they work the same from the CLI or the app.
+    Streamlit's docs confirm root-level secrets.toml keys are also exposed
+    as environment variables for local development, but don't document the
+    same for Community Cloud's secrets UI -- rather than rely on that,
+    copy them across explicitly. .env (via load_dotenv above) wins if a key
+    is set both ways, since it ran first and this only fills in gaps.
+    """
+    try:
+        secrets = st.secrets
+    except Exception:
+        return
+    try:
+        items = dict(secrets)
+    except Exception:
+        return
+    for key, value in items.items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+
+
+_bridge_secrets_into_environ()
 
 st.set_page_config(page_title="Streeto Planner", page_icon="\U0001f9ed", layout="wide")
 
@@ -99,6 +129,41 @@ def _check_password() -> bool:
         else:
             st.error("Wrong password.")
     return False
+
+
+KNOWN_MAPS_PATH = Path(__file__).parent / "known_maps.json"
+NEW_MAP_OPTION = "__new__"
+
+
+def _load_known_maps() -> list[dict[str, str]]:
+    """Previously-used map IDs, most recently added first.
+
+    Read fresh (not cached) since _remember_known_map can change the file
+    within the same running app. A local JSON file persists fully when
+    running locally; on Streamlit Cloud it lasts until the next redeploy,
+    then resets to whatever's committed -- fine for a personal convenience
+    list, not meant as durable multi-user storage.
+    """
+    try:
+        raw = json.loads(KNOWN_MAPS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict) and "id" in m]
+
+
+def _remember_known_map(map_id: str, title: str) -> None:
+    """Add a successfully-loaded map to the known list, if it's new."""
+    known = _load_known_maps()
+    if any(m["id"] == map_id for m in known):
+        return
+    known.insert(0, {"id": map_id, "label": title or map_id})
+    with contextlib.suppress(OSError):
+        # Best-effort: a read-only filesystem shouldn't break solving.
+        KNOWN_MAPS_PATH.write_text(
+            json.dumps(known, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
 
 
 @st.cache_data(show_spinner="Loading course...", ttl=600)
@@ -207,12 +272,20 @@ def _build_map(
 
     visits = [c.number for c in route.controls]
     strayed = False
+    geometry_warnings: list[distances.SnapWarning] = []
     try:
         geometry = _geometry(map_id, tuple(visits))
         folium.GeoJson(
             geometry, style_function=lambda _: {"color": "#b3541e", "weight": 4}
         ).add_to(fmap)
         strayed = distances.route_strays_outside_course(geometry, course)
+        by_number = {c.number: c for c in course.controls}
+        waypoints = [
+            course.start_finish,
+            *(by_number[n] for n in visits),
+            course.start_finish,
+        ]
+        geometry_warnings = distances.geometry_snap_warnings(geometry, waypoints)
     except (ValueError, RuntimeError, OSError):
         by_number = {c.number: c for c in course.controls}
         coords = [[course.start_finish.latitude, course.start_finish.longitude]]
@@ -227,6 +300,14 @@ def _build_map(
         st.warning(
             "The routed path strays outside the course's control area — "
             "possibly routing off the printed map."
+        )
+    if geometry_warnings:
+        st.warning(
+            "The drawn route snapped these controls far from their mapped "
+            "position, so the path shown near them may look wrong: "
+            + ", ".join(
+                f"{w.number} ({w.snapped_distance:.0f}m)" for w in geometry_warnings
+            )
         )
 
     bounds = [[n.latitude, n.longitude] for n in course.nodes]
@@ -243,8 +324,18 @@ def main() -> None:
     st.title("Streeto Planner")
     st.caption("Point a map ID at it, get a route.")
 
+    known_maps = _load_known_maps()
+    options = [m["id"] for m in known_maps] + [NEW_MAP_OPTION]
+    labels = {NEW_MAP_OPTION: "+ Enter a new map ID..."} | {
+        m["id"]: f"{m['label']} ({m['id']})" for m in known_maps
+    }
+    selected = st.selectbox("Map", options, format_func=lambda v: labels[v])
+    if selected == NEW_MAP_OPTION:
+        map_id_input = st.text_input("New map ID", placeholder="e.g. 698d11dd9c78c")
+    else:
+        map_id_input = selected
+
     with st.form("solve_form"):
-        map_id = st.text_input("Map ID", placeholder="e.g. 698d11dd9c78c")
         km_text = st.text_input(
             "Distance budget (km)",
             placeholder="leave blank for the optimum route through every control",
@@ -261,16 +352,17 @@ def main() -> None:
         submitted = st.form_submit_button("Solve", type="primary")
 
     if submitted:
-        if not map_id.strip():
+        map_id = map_id_input.strip()
+        if not map_id:
             st.error("Enter a map ID.")
             st.stop()
-        map_id = map_id.strip()
 
         try:
             course = _load_course(map_id)
         except (ValueError, LookupError, OSError) as error:
             st.error(str(error))
             st.stop()
+        _remember_known_map(map_id, course.title)
 
         provider_key = "mapbox" if provider_label == "Mapbox" else "ors"
         try:

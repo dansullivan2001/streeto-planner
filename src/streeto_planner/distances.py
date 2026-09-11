@@ -80,6 +80,34 @@ def approximate_matrix(
     return matrix
 
 
+def _patch_unreliable_legs(
+    nodes: Sequence[Control],
+    matrix: list[list[float]],
+    warnings: Sequence[SnapWarning],
+    detour: float = DEFAULT_DETOUR,
+) -> None:
+    """Replace distances touching a badly-snapped control, in place.
+
+    A control OpenRouteService/Mapbox snapped far from its real position
+    (see :class:`SnapWarning`) can make the routed distance to or from it
+    artificially cheap -- e.g. two controls that snapped to the same nearby
+    road looking like neighbours when they're really 150m apart -- which
+    lures the solver into a "shortcut" that isn't real. The straight-line
+    approximation isn't perfect either, but it doesn't inherit the snap
+    error, so it's the safer number for these specific legs. Controls that
+    snapped cleanly keep their real routed distances everywhere else.
+    """
+    index_by_number = {n.number: i for i, n in enumerate(nodes)}
+    for warning in warnings:
+        i = index_by_number[warning.number]
+        for j, other in enumerate(nodes):
+            if i == j:
+                continue
+            approx = haversine(nodes[i], other) * detour
+            matrix[i][j] = approx
+            matrix[j][i] = approx
+
+
 def routed_matrix(
     nodes: Sequence[Control], api_key: str | None = None, timeout: float = 60.0
 ) -> tuple[list[list[float]], list[SnapWarning]]:
@@ -88,7 +116,10 @@ def routed_matrix(
     Alongside the matrix, returns a warning for every control OpenRouteService
     had to snap more than :data:`SNAP_WARNING_THRESHOLD_M` from its real
     position to find a routable point — a sign the distances touching it may
-    not reflect where the control actually is.
+    not reflect where the control actually is. Distances touching such a
+    control are replaced with the straight-line approximation (see
+    :func:`_patch_unreliable_legs`) rather than left trusting a corrupted
+    number.
     """
     api_key = api_key or os.environ.get("OPENROUTESERVICE_API_KEY")
     if not api_key:
@@ -123,7 +154,9 @@ def routed_matrix(
         if isinstance(source, dict)
         and source.get("snapped_distance", 0) > SNAP_WARNING_THRESHOLD_M
     ]
-    return [[float(d) for d in row] for row in distances], warnings
+    matrix = [[float(d) for d in row] for row in distances]
+    _patch_unreliable_legs(nodes, matrix, warnings)
+    return matrix, warnings
 
 
 METRES_PER_DEGREE_LAT = EARTH_RADIUS_M * math.pi / 180
@@ -327,6 +360,37 @@ def route_geometry(
     return geojson
 
 
+def geometry_snap_warnings(
+    geometry: dict[str, Any], waypoints: Sequence[Control]
+) -> list[SnapWarning]:
+    """Snap-distance warnings recovered from a route's own geometry.
+
+    Unlike the Matrix API, OpenRouteService's Directions API doesn't report
+    each waypoint's snap distance directly. It does report ``way_points``:
+    indices into the returned geometry marking where each requested waypoint
+    actually landed. Comparing that landed point to what was asked for
+    recovers the same signal, so a route drawn from Directions gets this
+    check too -- not just one built from the Matrix API's own distances.
+    """
+    worst: dict[str, float] = {}
+    for feature in geometry.get("features", []):
+        way_points = feature.get("properties", {}).get("way_points")
+        coordinates = feature.get("geometry", {}).get("coordinates")
+        if not way_points or not coordinates:
+            continue
+        for waypoint, index in zip(waypoints, way_points, strict=False):
+            snapped_lon, snapped_lat = coordinates[index]
+            snapped = Control("_snap", snapped_lat, snapped_lon, 0)
+            distance = haversine(waypoint, snapped)
+            worst[waypoint.number] = max(worst.get(waypoint.number, 0.0), distance)
+
+    return [
+        SnapWarning(number, distance)
+        for number, distance in worst.items()
+        if distance > SNAP_WARNING_THRESHOLD_M
+    ]
+
+
 def mapbox_matrix(
     nodes: Sequence[Control], api_key: str | None = None, timeout: float = 60.0
 ) -> tuple[list[list[float]], list[SnapWarning]]:
@@ -337,7 +401,9 @@ def mapbox_matrix(
     stitched together from one request per pair of blocks. Alongside the
     matrix, returns a warning for every control Mapbox had to snap more than
     :data:`SNAP_WARNING_THRESHOLD_M` from its real position to find a routable
-    point.
+    point. Distances touching such a control are replaced with the
+    straight-line approximation (see :func:`_patch_unreliable_legs`) rather
+    than left trusting a corrupted number.
     """
     api_key = api_key or os.environ.get("MAPBOX_ACCESS_TOKEN")
     if not api_key:
@@ -361,6 +427,7 @@ def mapbox_matrix(
         for node, snapped in sorted(snap_distances.items())
         if snapped > SNAP_WARNING_THRESHOLD_M
     ]
+    _patch_unreliable_legs(nodes, matrix, warnings)
     return matrix, warnings
 
 
