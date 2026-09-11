@@ -80,3 +80,28 @@ def test_parse_course_requires_scored_controls(payload: dict) -> None:
     payload["controls"] = [c for c in payload["controls"] if c["type"] != "c_regular"]
     with pytest.raises(ValueError, match="no scored controls"):
         parse_course("698d11dd9c78c", payload)
+
+
+def test_paper_dimensions_default_to_unknown(course) -> None:
+    # The shared fixture payload has no papersize, matching a real OOM
+    # response we can't parse for this reason.
+    assert course.paper_width_m == 0.0
+    assert course.paper_height_m == 0.0
+
+
+def test_paper_dimensions_from_papersize(payload: dict) -> None:
+    payload["papersize"] = "p2970-2100"
+    payload["paperorientation"] = "landscape"
+    payload["scale"] = "s10000"
+    course = parse_course("698d11dd9c78c", payload)
+    assert course.paper_width_m == pytest.approx(2970.0)
+    assert course.paper_height_m == pytest.approx(2100.0)
+
+
+def test_paper_dimensions_swap_for_portrait(payload: dict) -> None:
+    payload["papersize"] = "p2970-2100"
+    payload["paperorientation"] = "portrait"
+    payload["scale"] = "s10000"
+    course = parse_course("698d11dd9c78c", payload)
+    assert course.paper_width_m == pytest.approx(2100.0)
+    assert course.paper_height_m == pytest.approx(2970.0)

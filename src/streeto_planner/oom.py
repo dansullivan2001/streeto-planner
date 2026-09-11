@@ -19,6 +19,7 @@ LOAD_URL = "https://oomap.dna-software.co.uk/php/load.php"
 USER_AGENT = "streeto-planner/0.1"
 MAP_ID_PATTERN = re.compile(r"\A[0-9a-f]{13}\Z")
 MICROSECOND_LIMIT = 1_000_000
+PAPERSIZE_PATTERN = re.compile(r"p(\d+)-(\d+)")
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,8 @@ class Course:
     rotation: float
     centre_latitude: float
     centre_longitude: float
+    paper_width_m: float
+    paper_height_m: float
     start_finish: Control
     controls: list[Control]
 
@@ -90,6 +93,30 @@ def is_plausible(map_id: str, earliest: dt.date, latest: dt.date) -> bool:
     return earliest <= created_at(map_id).date() <= latest
 
 
+def _paper_dimensions_m(data: dict[str, Any], scale: int) -> tuple[float, float]:
+    """Ground width and height the printed sheet covers, in metres.
+
+    ``papersize`` looks like ``p2970-2100``: the sheet's long and short sides
+    in tenths of a millimetre. ``paperorientation`` says which of those is
+    horizontal. Multiplying by scale converts a distance on paper to the
+    matching distance on the ground.
+
+    Returns ``(0.0, 0.0)`` if the payload has no papersize we can parse -
+    callers should treat that as "unknown", not a real zero-size map.
+    """
+    match = PAPERSIZE_PATTERN.match(str(data.get("papersize", "")))
+    if not match:
+        return 0.0, 0.0
+    long_mm = int(match.group(1)) / 10
+    short_mm = int(match.group(2)) / 10
+    width_mm, height_mm = (
+        (short_mm, long_mm)
+        if data.get("paperorientation") == "portrait"
+        else (long_mm, short_mm)
+    )
+    return width_mm * scale / 1000, height_mm * scale / 1000
+
+
 def parse_course(map_id: str, data: dict[str, Any]) -> Course:
     """Turn an OOM payload into a Course, without touching the network."""
     controls = data.get("controls")
@@ -116,15 +143,20 @@ def parse_course(map_id: str, data: dict[str, Any]) -> Course:
     if not scored:
         raise ValueError("course has no scored controls")
 
+    scale = int(str(data.get("scale", "s10000")).removeprefix("s"))
+    paper_width_m, paper_height_m = _paper_dimensions_m(data, scale)
+
     return Course(
         map_id=map_id,
         title=str(data.get("title", "")),
         event_date=str(data.get("eventdate", "")),
         club=str(data.get("club", "")),
-        scale=int(str(data.get("scale", "s10000")).removeprefix("s")),
+        scale=scale,
         rotation=float(data.get("rotation", 0.0)),
         centre_latitude=float(data["centre_lat"]),
         centre_longitude=float(data["centre_lon"]),
+        paper_width_m=paper_width_m,
+        paper_height_m=paper_height_m,
         start_finish=Control(
             number="start_finish",
             latitude=float(starts[0]["wgs84lat"]),

@@ -33,6 +33,13 @@ Plan routes across a range of distance budgets:
 .venv/bin/streeto solve 698d11dd9c78c --km 10 13 15
 ```
 
+With real pedestrian routing (`OPENROUTESERVICE_API_KEY` or `MAPBOX_ACCESS_TOKEN`
+must be set):
+
+```bash
+.venv/bin/streeto solve 698d11dd9c78c --km 10 13 15 --routed --provider mapbox
+```
+
 Recover an ID you could not quite read, marking the uncertain characters:
 
 ```bash
@@ -60,12 +67,16 @@ checked so far, so `course` reports any control that breaks it — a useful sign
 that something was misread or that an organiser has done something unusual.
 
 **Distances are approximated by default.** Real planning needs pedestrian
-routing. Set `OPENROUTESERVICE_API_KEY` and pass `--routed` for that. Without a
-key, distances are great-circle inflated by a detour index. Measured against
-real routed answers on two solved London courses, the index came out at 1.40 in
-the inner city and 1.47 in the suburbs, and the approximation flatters the
-solver by 5–9% — it picks legs that are cheap in a straight line but blocked by
-a river or a railway. Treat approximate scores as ±10% indicative.
+routing. Set `OPENROUTESERVICE_API_KEY` and pass `--routed` for that, or set
+`MAPBOX_ACCESS_TOKEN` and pass `--routed --provider mapbox` to use Mapbox's
+Matrix API instead. Mapbox caps a single request at 25 coordinates, well under
+a typical course's control count, so that path chunks the course into blocks
+and stitches the full matrix together from several requests. Without a key,
+distances are great-circle inflated by a detour index. Measured against real
+routed answers on two solved London courses, the index came out at 1.40 in the
+inner city and 1.47 in the suburbs, and the approximation flatters the solver
+by 5–9% — it picks legs that are cheap in a straight line but blocked by a
+river or a railway. Treat approximate scores as ±10% indicative.
 
 **The solver is a heuristic.** Randomised greedy insertion, 2-opt cleanup,
 restarted. Forty-six controls across eleven budgets solves in under half a
@@ -83,6 +94,18 @@ small budgets, but it is honest: it never claims optimality it has not proven.
   runner's pace. That is the next thing worth fixing.
 - Terrain is ignored. On a map with contours, hills cost time that a distance
   budget cannot see.
+- A route can be routed outside the printed map's boundary. OOM's metadata
+  (`papersize`, `rotation`) would in principle let us compute that boundary
+  exactly, but its rotation convention is undocumented and untested here — a
+  hard geofence built on a guess could silently reject valid legs or admit
+  invalid ones with false confidence. The web app instead flags a route if it
+  strays well outside a padded box around the course's own controls, which
+  catches a wild excursion but is not a precise check.
+- Some controls sit at points OSM has no nearby mapped footpath for (inside a
+  garden, on a driveway), so OpenRouteService silently snaps them to whatever
+  routable point it can find, however far away, corrupting the distances that
+  touch them. `solve --routed` and the web app flag any control snapped more
+  than 50m from its real position.
 
 ## Credits
 

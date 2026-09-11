@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Streeto Planner</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1c1b19; --muted: #6b6a66;
+    --line: #e2e0da; --accent: #b3541e; --accent-ink: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 1.25rem 1.5rem 0.75rem; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  header h1 { margin: 0 0 0.15rem; font-size: 1.25rem; }
+  header p { margin: 0 0 0.9rem; color: var(--muted); font-size: 0.88rem; }
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.9rem; }
+  input, button {
+    font: inherit; padding: 0.5rem 0.7rem; border-radius: 6px;
+    border: 1px solid var(--line);
+  }
+  input { min-width: 12rem; }
+  button {
+    background: var(--accent); color: var(--accent-ink); border: none;
+    cursor: pointer; font-weight: 600;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  main { display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 0; height: calc(100vh - 92px); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } #map { height: 60vh; } }
+  #panel { padding: 1rem 1.5rem; overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); }
+  #map { height: 100%; min-height: 320px; }
+  #status { color: var(--muted); font-size: 0.85rem; min-height: 1.2em; }
+  #status.error { color: #b3261e; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
+  th, td { text-align: right; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover, tbody tr.selected { background: #fbeee3; }
+  .summary { font-size: 0.88rem; line-height: 1.5; margin-bottom: 0.75rem; }
+  .summary b { display: block; font-size: 1.02rem; margin-bottom: 0.1rem; }
+  .caveat { font-size: 0.78rem; color: var(--muted); margin: 0.4rem 0 0; }
+  .anomaly { color: #b3261e; font-size: 0.78rem; }
+  .control-label {
+    background: rgba(255,255,255,0.85); border: none; box-shadow: none;
+    font-size: 0.7rem; font-weight: 600; padding: 0 3px; color: var(--ink);
+  }
+  .control-label::before { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Streeto Planner</h1>
+  <p>Point a map ID at it, get a route.</p>
+  <div class="row">
+    <input id="mapId" placeholder="map ID, e.g. 698d11dd9c78c" />
+    <input id="km" placeholder="km budgets, e.g. 8,10,13" value="8,10,13" />
+    <label style="font-size:0.85rem;color:var(--muted)">
+      <input id="routed" type="checkbox" style="width:auto;min-width:0;vertical-align:-2px" /> routed
+    </label>
+    <select id="provider" style="font:inherit;padding:0.5rem 0.6rem;border-radius:6px;border:1px solid var(--line)">
+      <option value="ors">OpenRouteService</option>
+      <option value="mapbox">Mapbox</option>
+    </select>
+    <button id="solveBtn">Solve</button>
+    <button id="courseBtn" class="secondary">Just load course</button>
+  </div>
+  <div id="status"></div>
+</header>
+<main>
+  <div id="panel">
+    <div id="summary"></div>
+    <div id="results"></div>
+    <p id="routeNote" class="caveat"></p>
+  </div>
+  <div id="map"></div>
+</main>
+<script>
+const statusEl = document.getElementById('status');
+const summaryEl = document.getElementById('summary');
+const resultsEl = document.getElementById('results');
+const map = L.map('map').setView([51.5, -0.1], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let controlMarkers = L.layerGroup().addTo(map);
+let routeLayer = null;
+let currentCourse = null;
+let currentResults = null;
+let currentMapId = null;
+
+function setStatus(text, isError) {
+  statusEl.textContent = text || '';
+  statusEl.className = isError ? 'error' : '';
+}
+
+let boundaryLayer = null;
+
+function plotControls(course) {
+  controlMarkers.clearLayers();
+  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; }
+  if (course.boundary) {
+    boundaryLayer = L.polygon(course.boundary, {
+      color: '#1c1b19', weight: 2, dashArray: '4 6', fill: false
+    }).bindTooltip('Printed map edge').addTo(map);
+  }
+  const pts = [[course.start_finish.lat, course.start_finish.lon]];
+  L.circleMarker([course.start_finish.lat, course.start_finish.lon], {
+    radius: 8, color: '#1c1b19', fillColor: '#1c1b19', fillOpacity: 1
+  }).bindTooltip('S/F', { permanent: true, direction: 'top', className: 'control-label' })
+    .addTo(controlMarkers);
+  for (const c of course.controls) {
+    pts.push([c.lat, c.lon]);
+    L.circleMarker([c.lat, c.lon], {
+      radius: 5, color: '#b3541e', fillColor: '#f2c9ab', fillOpacity: 0.9, weight: 2
+    }).bindTooltip(String(c.number), { permanent: true, direction: 'top', className: 'control-label' })
+      .bindPopup(`Control ${c.number}: ${c.points} points`)
+      .addTo(controlMarkers);
+  }
+  if (course.boundary) pts.push(...course.boundary);
+  if (pts.length) map.fitBounds(pts, { padding: [30, 30] });
+}
+
+function drawStraightRoute(course, visits) {
+  const byNumber = Object.fromEntries(course.controls.map(c => [c.number, c]));
+  const coords = [[course.start_finish.lat, course.start_finish.lon]];
+  for (const number of visits) {
+    const c = byNumber[number];
+    if (c) coords.push([c.lat, c.lon]);
+  }
+  coords.push([course.start_finish.lat, course.start_finish.lon]);
+  routeLayer = L.polyline(coords, { color: '#b3541e', weight: 3, dashArray: '6 6' }).addTo(map);
+}
+
+async function drawRoute(mapId, course, visits) {
+  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  const routeNoteEl = document.getElementById('routeNote');
+  routeNoteEl.textContent = '';
+  try {
+    const params = new URLSearchParams();
+    visits.forEach(number => params.append('numbers', number));
+    const res = await fetch(`/api/geometry/${encodeURIComponent(mapId)}?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'failed to fetch route geometry');
+    routeLayer = L.geoJSON(data.geojson, {
+      style: { color: '#b3541e', weight: 4 }
+    }).addTo(map);
+    if (data.strays_outside_course) {
+      routeNoteEl.textContent =
+        'Note: the routed path strays outside the course’s control area — ' +
+        'possibly routing off the printed map.';
+    }
+  } catch (err) {
+    drawStraightRoute(course, visits);
+    routeNoteEl.textContent =
+      `Showing straight-line approximation (${err.message}).`;
+  }
+}
+
+function renderSummary(course) {
+  let html = `<div class="summary"><b>${course.title || '(untitled)'}</b>
+    ${course.event_date} &middot; ${course.club}<br/>
+    ${course.controls.length} controls, ${course.total_points} points available<br/>
+    scale 1:${course.scale}, minted ${course.minted.slice(0, 10)}</div>`;
+  if (course.anomalies.length) {
+    html += `<div class="anomaly">Scoring anomalies: ` +
+      course.anomalies.map(a => `${a.number}=${a.points} (expected ${a.implied})`).join(', ') +
+      `</div>`;
+  }
+  summaryEl.innerHTML = html;
+}
+
+function renderResults(payload) {
+  currentResults = payload;
+  const rows = payload.results.map((r, i) => `
+    <tr data-i="${i}">
+      <td>${r.km}</td><td>${r.points}</td><td>${r.percent.toFixed(0)}%</td>
+      <td>${r.visits.length}</td><td>${(r.gap * 100).toFixed(0)}%</td>
+    </tr>`).join('');
+  const warningHtml = (payload.warnings && payload.warnings.length) ? `
+    <div class="anomaly">Snapped far from mapped position, legs touching them may be
+      unreliable: ` +
+      payload.warnings.map(w => `${w.number} (${w.snapped_distance.toFixed(0)}m)`).join(', ') +
+    `</div>` : '';
+  resultsEl.innerHTML = `
+    <table>
+      <thead><tr><th>km</th><th>points</th><th>%</th><th>stops</th><th>gap&le;</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="caveat">${payload.caveat}</p>
+    ${warningHtml}`;
+  resultsEl.querySelectorAll('tbody tr').forEach(tr => {
+    tr.addEventListener('click', () => {
+      resultsEl.querySelectorAll('tr').forEach(t => t.classList.remove('selected'));
+      tr.classList.add('selected');
+      const r = payload.results[Number(tr.dataset.i)];
+      drawRoute(currentMapId, currentCourse, r.visits);
+    });
+  });
+  if (payload.results.length) {
+    resultsEl.querySelector('tbody tr').classList.add('selected');
+    drawRoute(currentMapId, currentCourse, payload.results[0].visits);
+  }
+}
+
+async function loadCourse() {
+  const mapId = document.getElementById('mapId').value.trim();
+  if (!mapId) { setStatus('enter a map ID', true); return; }
+  setStatus('loading course…');
+  resultsEl.innerHTML = '';
+  document.getElementById('routeNote').textContent = '';
+  try {
+    const res = await fetch(`/api/course/${encodeURIComponent(mapId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'failed to load course');
+    currentCourse = data;
+    currentMapId = mapId;
+    renderSummary(data);
+    plotControls(data);
+    setStatus('');
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function solve() {
+  const mapId = document.getElementById('mapId').value.trim();
+  if (!mapId) { setStatus('enter a map ID', true); return; }
+  const km = document.getElementById('km').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (!km.length) { setStatus('enter at least one km budget', true); return; }
+  const routed = document.getElementById('routed').checked;
+  const provider = document.getElementById('provider').value;
+  setStatus('solving…');
+  resultsEl.innerHTML = '';
+  try {
+    const params = new URLSearchParams();
+    km.forEach(k => params.append('km', k));
+    params.append('routed', routed);
+    params.append('provider', provider);
+    const res = await fetch(`/api/solve/${encodeURIComponent(mapId)}?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'failed to solve');
+    currentCourse = data.course;
+    currentMapId = mapId;
+    renderSummary(data.course);
+    plotControls(data.course);
+    renderResults(data);
+    setStatus('');
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+document.getElementById('courseBtn').addEventListener('click', loadCourse);
+document.getElementById('solveBtn').addEventListener('click', solve);
+document.getElementById('mapId').addEventListener('keydown', e => {
+  if (e.key === 'Enter') solve();
+});
+</script>
+</body>
+</html>

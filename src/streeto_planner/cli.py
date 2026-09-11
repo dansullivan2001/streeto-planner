@@ -8,8 +8,12 @@ import json
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from streeto_planner import distances, mapid, oom
 from streeto_planner.solve import solve
+
+load_dotenv()
 
 
 def _course_command(args: argparse.Namespace) -> int:
@@ -52,9 +56,14 @@ def _resolve_command(args: argparse.Namespace) -> int:
 def _solve_command(args: argparse.Namespace) -> int:
     course = oom.fetch_course(args.map_id)
     nodes = course.nodes
+    warnings: list[distances.SnapWarning] = []
     if args.routed:
-        matrix = distances.routed_matrix(nodes)
-        caveat = "real pedestrian routing"
+        if args.provider == "mapbox":
+            matrix, warnings = distances.mapbox_matrix(nodes)
+            caveat = "real pedestrian routing (Mapbox)"
+        else:
+            matrix, warnings = distances.routed_matrix(nodes)
+            caveat = "real pedestrian routing (OpenRouteService)"
     else:
         matrix = distances.approximate_matrix(nodes, args.detour)
         caveat = (
@@ -64,7 +73,13 @@ def _solve_command(args: argparse.Namespace) -> int:
 
     print(f"{course.title}: {len(course.controls)} controls, "
           f"{course.total_points} points available")
-    print(f"Distances: {caveat}\n")
+    print(f"Distances: {caveat}")
+    if warnings:
+        print("  NOTE: these controls snapped far from their mapped position; "
+              "legs touching them may be unreliable:")
+        for warning in warnings:
+            print(f"    {warning.number}: snapped {warning.snapped_distance:.0f} m")
+    print()
     print(f"{'km':>4} {'points':>7} {'%':>5} {'stops':>6} {'gap<=':>6}  route")
 
     results = []
@@ -103,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     plan.add_argument("--km", type=int, nargs="+", default=list(range(5, 16)))
     plan.add_argument("--detour", type=float, default=distances.DEFAULT_DETOUR)
     plan.add_argument("--routed", action="store_true",
-                      help="use OpenRouteService instead of the approximation")
+                      help="use real pedestrian routing instead of the approximation")
+    plan.add_argument("--provider", choices=["ors", "mapbox"], default="ors",
+                      help="routing provider to use with --routed (default: ors)")
     plan.add_argument("--iterations", type=int, default=60)
     plan.add_argument("--seed", type=int, default=0)
     plan.add_argument("--json", type=Path)
