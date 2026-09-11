@@ -185,7 +185,9 @@ def _matrix(map_id: str, routed: bool, provider: str, detour: float):
     course = _load_course(map_id)
     nodes = course.nodes
     if not routed:
-        matrix = distances.approximate_matrix(nodes, detour)
+        matrix = distances.approximate_matrix(
+            nodes, detour, no_access_points=course.no_access_points
+        )
         caveat = (
             f"approximate: straight line x {detour}, historically "
             f"~{distances.APPROXIMATION_OPTIMISM:.0%} optimistic"
@@ -209,7 +211,9 @@ def _geometry(map_id: str, visit_numbers: tuple[str, ...]) -> dict:
         *(by_number[n] for n in visit_numbers),
         course.start_finish,
     ]
-    return distances.route_geometry(waypoints)
+    return distances.route_geometry(
+        waypoints, avoid_points=course.no_access_points or None
+    )
 
 
 @st.cache_data(show_spinner="Fetching MapRun results...", ttl=600)
@@ -279,6 +283,16 @@ def _build_map(
                 'transform:translate(-50%,-150%)">'
                 f"{c.number}</div>"
             )),
+        ).add_to(fmap)
+    for lat, lon in course.no_access_points:
+        folium.Marker(
+            [lat, lon],
+            icon=folium.DivIcon(html=(
+                '<div style="font-size:16px;font-weight:900;color:#8b1e8b;'
+                'text-shadow:0 0 3px #fff,0 0 3px #fff;'
+                'transform:translate(-50%,-50%)">&times;</div>'
+            )),
+            tooltip="No access",
         ).add_to(fmap)
 
     visits = [c.number for c in route.controls]
@@ -404,6 +418,7 @@ def main() -> None:
             "warnings": warnings,
             "unbounded": budget == math.inf,
             "show_real_map": show_real_map,
+            "routed": routed,
         }
 
     result = st.session_state.get("result")
@@ -429,6 +444,21 @@ def main() -> None:
             f"gap ≤ {route.gap:.0%}"
         )
     st.caption(result["caveat"])
+
+    if course.no_access_points:
+        note = (
+            "the drawn route avoids them, but the route itself was chosen "
+            "without accounting for them (OpenRouteService's Matrix API "
+            "ignores avoid_polygons entirely -- confirmed directly, not "
+            "assumed)"
+            if result["routed"]
+            else "legs crossing too close to one are penalised when "
+            "choosing the route"
+        )
+        st.caption(
+            f"{len(course.no_access_points)} marked no-access point(s) on "
+            f"this course — {note}."
+        )
 
     anomalies = course.scoring_anomalies()
     if anomalies:

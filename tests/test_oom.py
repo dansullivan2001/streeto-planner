@@ -144,3 +144,18 @@ def test_parse_render_url_portrait_swaps_paper_dimensions(payload: dict) -> None
     payload["scale"] = "s10000"
     url = parse_render_url("698d11dd9c78c", payload)
     assert "paper=0.210,0.297" in url
+
+
+def test_parse_course_reads_no_access_points(course) -> None:
+    # The shared fixture payload includes one c_cross entry.
+    assert course.no_access_points == [(51.33, -0.4)]
+    # It's not a scored control.
+    assert [c.number for c in course.controls] == ["10", "31", "52"]
+
+
+def test_no_access_points_default_to_empty(payload: dict) -> None:
+    payload["controls"] = [
+        c for c in payload["controls"] if c["type"] != "c_cross"
+    ]
+    course = parse_course("698d11dd9c78c", payload)
+    assert course.no_access_points == []

@@ -59,6 +59,7 @@ class Course:
     paper_height_m: float
     start_finish: Control
     controls: list[Control]
+    no_access_points: list[tuple[float, float]]
 
     @property
     def total_points(self) -> int:
@@ -161,6 +162,16 @@ def parse_course(map_id: str, data: dict[str, Any]) -> Course:
     if not scored:
         raise ValueError("course has no scored controls")
 
+    # c_cross marks a single point the course setter has explicitly ruled
+    # out -- a locked gate, a fence with no gap -- rather than a scored
+    # control, even though it carries the same number/score fields as one
+    # (unused boilerplate: the rendered map shows no label there).
+    no_access_points = [
+        (float(c["wgs84lat"]), float(c["wgs84lon"]))
+        for c in controls
+        if c.get("type") == "c_cross"
+    ]
+
     scale = int(str(data.get("scale", "s10000")).removeprefix("s"))
     paper_width_m, paper_height_m = _paper_dimensions_m(data, scale)
 
@@ -182,6 +193,7 @@ def parse_course(map_id: str, data: dict[str, Any]) -> Course:
             points=0,
         ),
         controls=scored,
+        no_access_points=no_access_points,
     )
 
 

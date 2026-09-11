@@ -65,7 +65,9 @@ def _solve_command(args: argparse.Namespace) -> int:
             matrix, warnings = distances.routed_matrix(nodes)
             caveat = "real pedestrian routing (OpenRouteService)"
     else:
-        matrix = distances.approximate_matrix(nodes, args.detour)
+        matrix = distances.approximate_matrix(
+            nodes, args.detour, no_access_points=course.no_access_points
+        )
         caveat = (
             f"approximate: straight line x {args.detour}, "
             f"historically ~{distances.APPROXIMATION_OPTIMISM:.0%} optimistic"
@@ -74,6 +76,9 @@ def _solve_command(args: argparse.Namespace) -> int:
     print(f"{course.title}: {len(course.controls)} controls, "
           f"{course.total_points} points available")
     print(f"Distances: {caveat}")
+    if course.no_access_points:
+        note = "" if not args.routed else " (not accounted for with --routed)"
+        print(f"  {len(course.no_access_points)} marked no-access point(s){note}")
     if warnings:
         print("  NOTE: these controls snapped far from their mapped position; "
               "legs touching them may be unreliable:")

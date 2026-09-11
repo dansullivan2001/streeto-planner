@@ -66,17 +66,72 @@ def haversine(a: Control, b: Control) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(inner))
 
 
+#: A straight-line leg passing within this many metres of a marked no-access
+#: point (OOM's c_cross: a locked gate, a fence with no gap, explicitly ruled
+#: out by the course setter) is treated as blocked by it -- close enough that
+#: a real path could not thread past without effectively going through it.
+NO_ACCESS_BUFFER_M = 15.0
+
+#: Added to a blocked leg's straight-line distance, standing in for the real
+#: cost of walking around the obstruction. Not a measured detour -- there's
+#: no data to measure it from -- just enough to stop the solver treating an
+#: impossible direct line as free.
+NO_ACCESS_PENALTY_M = 100.0
+
+
+def _point_to_segment_distance_m(
+    point: tuple[float, float], a: Control, b: Control
+) -> float:
+    """Shortest distance from a (lat, lon) point to the segment a-b, in metres.
+
+    Uses a flat-earth projection local to the segment, accurate enough at
+    Street-O scales (a few km).
+    """
+    lat0 = (a.latitude + b.latitude) / 2
+    metres_per_lon = METRES_PER_DEGREE_LAT * math.cos(math.radians(lat0))
+
+    def to_xy(lat: float, lon: float) -> tuple[float, float]:
+        return (
+            (lon - a.longitude) * metres_per_lon,
+            (lat - a.latitude) * METRES_PER_DEGREE_LAT,
+        )
+
+    bx, by = to_xy(b.latitude, b.longitude)
+    px, py = to_xy(point[0], point[1])
+
+    length_sq = bx * bx + by * by
+    if length_sq == 0:
+        return math.hypot(px, py)
+    t = max(0.0, min(1.0, (px * bx + py * by) / length_sq))
+    return math.hypot(px - t * bx, py - t * by)
+
+
 def approximate_matrix(
-    nodes: Sequence[Control], detour: float = DEFAULT_DETOUR
+    nodes: Sequence[Control],
+    detour: float = DEFAULT_DETOUR,
+    no_access_points: Sequence[tuple[float, float]] | None = None,
 ) -> list[list[float]]:
-    """Straight-line distances inflated by a detour index."""
+    """Straight-line distances inflated by a detour index.
+
+    If ``no_access_points`` is given, a leg whose straight line passes within
+    :data:`NO_ACCESS_BUFFER_M` of one is penalised (see
+    :data:`NO_ACCESS_PENALTY_M`): its raw straight-line distance would
+    flatter it, since a real walker cannot go straight through a point the
+    course setter has explicitly ruled out.
+    """
     if detour < 1:
         raise ValueError("a detour index below 1 would be shorter than a straight line")
     size = len(nodes)
     matrix = [[0.0] * size for _ in range(size)]
     for i in range(size):
         for j in range(i + 1, size):
-            matrix[i][j] = matrix[j][i] = haversine(nodes[i], nodes[j]) * detour
+            distance = haversine(nodes[i], nodes[j]) * detour
+            if no_access_points and any(
+                _point_to_segment_distance_m(p, nodes[i], nodes[j]) < NO_ACCESS_BUFFER_M
+                for p in no_access_points
+            ):
+                distance += NO_ACCESS_PENALTY_M
+            matrix[i][j] = matrix[j][i] = distance
     return matrix
 
 
@@ -324,14 +379,48 @@ def _course_bounds(
     )
 
 
+#: Half the side length of the small square used to mark a no-access point as
+#: an area OpenRouteService's Directions API must route around -- big enough
+#: to force a real detour past it, small enough not to block a legitimate
+#: path running nearby.
+AVOID_POINT_HALF_SIDE_M = 6.0
+
+
+def _square_polygon_m(
+    point: tuple[float, float], half_side_m: float
+) -> list[list[float]]:
+    """A small square (as a GeoJSON ring) centred on a (lat, lon) point."""
+    lat, lon = point
+    lat_pad = half_side_m / METRES_PER_DEGREE_LAT
+    lon_pad = half_side_m / (METRES_PER_DEGREE_LAT * math.cos(math.radians(lat)))
+    return [
+        [lon - lon_pad, lat - lat_pad],
+        [lon + lon_pad, lat - lat_pad],
+        [lon + lon_pad, lat + lat_pad],
+        [lon - lon_pad, lat + lat_pad],
+        [lon - lon_pad, lat - lat_pad],
+    ]
+
+
 def route_geometry(
-    waypoints: Sequence[Control], api_key: str | None = None, timeout: float = 60.0
+    waypoints: Sequence[Control],
+    api_key: str | None = None,
+    timeout: float = 60.0,
+    avoid_points: Sequence[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Real pedestrian route geometry through an ordered list of waypoints.
 
     Returns GeoJSON straight from OpenRouteService's Directions API: one
     request through every waypoint in order gives back a single connected
     path, which is what a Street-O runner would actually walk.
+
+    ``avoid_points`` (e.g. OOM's c_cross: points the course setter has
+    explicitly ruled out) are each fenced off as a small square and passed as
+    ``avoid_polygons`` -- confirmed against the live API to force a real
+    detour, unlike the Matrix API, which silently ignores this option
+    entirely (verified directly: an avoid_polygons covering an entire route
+    made no difference to the distance it returned). So this only improves
+    the geometry drawn here, not the distances a solver decides a route from.
     """
     api_key = api_key or os.environ.get("OPENROUTESERVICE_API_KEY")
     if not api_key:
@@ -339,10 +428,20 @@ def route_geometry(
     if len(waypoints) < 2:
         raise ValueError("need at least two waypoints to route between")
 
-    payload = {
+    payload: dict[str, Any] = {
         "coordinates": [[w.longitude, w.latitude] for w in waypoints],
         "instructions": False,
     }
+    if avoid_points:
+        payload["options"] = {
+            "avoid_polygons": {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [_square_polygon_m(p, AVOID_POINT_HALF_SIDE_M)]
+                    for p in avoid_points
+                ],
+            }
+        }
     request = Request(
         ORS_DIRECTIONS_URL,
         data=json.dumps(payload).encode(),

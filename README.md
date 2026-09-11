@@ -125,8 +125,21 @@ small budgets, but it is honest: it never claims optimality it has not proven.
 
 ## Known limits
 
-- Uncrossable walls, railways and fences (`c_cross` in OOM) are not yet fed to
-  the router, so a route may cross something the event forbids.
+- OOM's `c_cross` marks a single point the course setter has explicitly ruled
+  out (a locked gate, a fence with no gap) — confirmed by inspecting real
+  courses (they're single points, not paired into barrier lines, and carry
+  no meaningful orientation). Approximate solving penalises a leg whose
+  straight line passes too close to one, and the drawn route (when using
+  real OpenRouteService routing) is fenced off from it too. What's still
+  missing: the *choice* of route in real-routing mode doesn't account for
+  these, because OpenRouteService's Matrix API silently ignores
+  `avoid_polygons` entirely — confirmed directly (a polygon covering the
+  whole route made no difference to the distance returned), not assumed —
+  while its Directions API genuinely honours it. There's also no handling
+  yet for the separate purple hatched "out of bounds" areas some maps show;
+  those aren't exposed by OOM's course API at all, so accounting for them
+  would need a separate investigation (likely reverse-engineering which OSM
+  landuse/access tags the map renderer treats as out of bounds).
 - The budget is distance, not time. Street-O is scored on time with a penalty
   for finishing late, so the right model is points minus penalty, given a
   runner's pace. That is the next thing worth fixing.

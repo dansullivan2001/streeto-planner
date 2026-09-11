@@ -8,10 +8,14 @@ import pytest
 from conftest import METRES_PER_DEGREE_LAT, control
 
 from streeto_planner.distances import (
+    NO_ACCESS_BUFFER_M,
+    NO_ACCESS_PENALTY_M,
     SnapWarning,
     _best_bearing,
     _overshoot,
     _patch_unreliable_legs,
+    _point_to_segment_distance_m,
+    _square_polygon_m,
     approximate_matrix,
     course_boundary,
     detour_index,
@@ -249,3 +253,59 @@ def test_patch_unreliable_legs_does_nothing_without_warnings() -> None:
     matrix = [[0.0, 40.0], [40.0, 0.0]]
     _patch_unreliable_legs(nodes, matrix, [])
     assert matrix == [[0.0, 40.0], [40.0, 0.0]]
+
+
+def test_point_to_segment_distance_is_near_zero_on_the_segment() -> None:
+    a = control("A", 0, 0)
+    b = control("B", 1000, 0)
+    midpoint = ((a.latitude + b.latitude) / 2, a.longitude)
+    assert _point_to_segment_distance_m(midpoint, a, b) < 1.0
+
+
+def test_point_to_segment_distance_measures_perpendicular_offset() -> None:
+    a = control("A", 0, 0)
+    b = control("B", 1000, 0)
+    offset_lon = a.longitude + 200 / (
+        METRES_PER_DEGREE_LAT * math.cos(math.radians(a.latitude))
+    )
+    point = ((a.latitude + b.latitude) / 2, offset_lon)
+    assert _point_to_segment_distance_m(point, a, b) == pytest.approx(200, rel=0.02)
+
+
+def test_point_to_segment_distance_clamps_beyond_the_endpoint() -> None:
+    a = control("A", 0, 0)
+    b = control("B", 1000, 0)
+    before_a = (a.latitude - 500 / METRES_PER_DEGREE_LAT, a.longitude)
+    assert _point_to_segment_distance_m(before_a, a, b) == pytest.approx(500, rel=0.02)
+
+
+def test_approximate_matrix_penalises_a_blocked_leg() -> None:
+    nodes = [control("A", 0, 0), control("B", 1000, 0)]
+    midpoint = ((nodes[0].latitude + nodes[1].latitude) / 2, nodes[0].longitude)
+    plain = approximate_matrix(nodes, detour=1.0)
+    blocked = approximate_matrix(nodes, detour=1.0, no_access_points=[midpoint])
+    assert blocked[0][1] == pytest.approx(plain[0][1] + NO_ACCESS_PENALTY_M)
+
+
+def test_approximate_matrix_ignores_a_distant_no_access_point() -> None:
+    nodes = [control("A", 0, 0), control("B", 1000, 0)]
+    far_away = (nodes[0].latitude, nodes[0].longitude + 1.0)
+    plain = approximate_matrix(nodes, detour=1.0)
+    unaffected = approximate_matrix(nodes, detour=1.0, no_access_points=[far_away])
+    assert unaffected[0][1] == pytest.approx(plain[0][1])
+    assert NO_ACCESS_BUFFER_M > 0  # sanity: the buffer constant is meaningful
+
+
+def test_square_polygon_m_is_a_closed_ring_of_the_right_size() -> None:
+    lat, lon = 51.33, -0.40
+    ring = _square_polygon_m((lat, lon), 10.0)
+    assert len(ring) == 5
+    assert ring[0] == ring[-1]
+    lons = [p[0] for p in ring]
+    lats = [p[1] for p in ring]
+    width_m = (
+        (max(lons) - min(lons)) * METRES_PER_DEGREE_LAT * math.cos(math.radians(lat))
+    )
+    height_m = (max(lats) - min(lats)) * METRES_PER_DEGREE_LAT
+    assert width_m == pytest.approx(20.0, rel=0.02)
+    assert height_m == pytest.approx(20.0, rel=0.02)
