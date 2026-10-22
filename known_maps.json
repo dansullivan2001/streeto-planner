@@ -1,5 +1,15 @@
 [
   {
+    "id": "6ac50bc2210a8",
+    "label": "TATTENHAM CORNER STREET O (2026-10-20)",
+    "maprun_event": "Tattenham Corner Oct26 PXAS ScoreQ60"
+  },
+  {
+    "id": "6a808233c5263",
+    "label": "Burpham & Merrow Street O (2026-09-15)",
+    "maprun_event": "Burpham Sep26 PXAS Score Q60"
+  },
+  {
     "id": "69db42cac22e9",
     "label": "Worcester Park Apr 2026 (2026-04-21)",
     "maprun_event": "Worcester Park Apr26 PXAS ScoreQ60"

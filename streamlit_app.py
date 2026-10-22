@@ -8,6 +8,7 @@ also work from a local .env for development) -- see README.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import math
 import os
@@ -20,7 +21,7 @@ from folium.elements import JSCSSMixin
 from folium.template import Template
 from streamlit_folium import st_folium
 
-from streeto_planner import distances, maprun, oom
+from streeto_planner import distances, export, maprun, oom
 from streeto_planner.solve import solve
 
 load_dotenv()
@@ -232,7 +233,8 @@ def _build_map(
     route,
     map_id: str,
     show_real_map: bool,
-) -> folium.Map:
+) -> tuple[folium.Map, list[tuple[float, float]]]:
+    """The interactive map, plus the route line drawn on it as (lat, lon)."""
     fmap = folium.Map(
         location=[course.centre_latitude, course.centre_longitude],
         tiles="OpenStreetMap",
@@ -311,13 +313,11 @@ def _build_map(
             course.start_finish,
         ]
         geometry_warnings = distances.geometry_snap_warnings(geometry, waypoints)
+        line = export.geometry_line(geometry)
     except (ValueError, RuntimeError, OSError):
-        by_number = {c.number: c for c in course.controls}
-        coords = [[course.start_finish.latitude, course.start_finish.longitude]]
-        coords += [[by_number[n].latitude, by_number[n].longitude] for n in visits]
-        coords.append([course.start_finish.latitude, course.start_finish.longitude])
+        line = export.straight_line(course, route)
         folium.PolyLine(
-            coords, color="#b3541e", weight=3, dash_array="6 6"
+            line, color="#b3541e", weight=3, dash_array="6 6"
         ).add_to(fmap)
         st.caption("Showing a straight-line approximation (no route geometry).")
 
@@ -339,7 +339,37 @@ def _build_map(
     if boundary is not None:
         bounds += [list(corner) for corner in boundary]
     fmap.fit_bounds(bounds, padding=(30, 30))
-    return fmap
+    return fmap, line
+
+
+def _render_downloads(
+    course: oom.Course,
+    route,
+    fmap: folium.Map,
+    line: list[tuple[float, float]],
+) -> None:
+    """Buttons to save the route for sharing or loading onto a watch."""
+    stem = export.file_stem(course, route)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download map (HTML)",
+            # Render a copy: rendering adds to the map's script, and the
+            # live map still has to go through st_folium afterwards.
+            data=copy.deepcopy(fmap).get_root().render(),
+            file_name=f"{stem}.html",
+            mime="text/html",
+            help="A standalone interactive map anyone can open in a browser.",
+        )
+    with col2:
+        st.download_button(
+            "Download route (GPX)",
+            data=export.route_gpx(course, route, line),
+            file_name=f"{stem}.gpx",
+            mime="application/gpx+xml",
+            help="For a watch, Strava, OS Maps etc. Controls are waypoints, "
+                 "numbered in visit order.",
+        )
 
 
 def main() -> None:
@@ -480,7 +510,10 @@ def main() -> None:
 
     st.write("Route: " + " → ".join(c.number for c in route.controls))
 
-    fmap = _build_map(course, route, result["map_id"], result["show_real_map"])
+    fmap, line = _build_map(
+        course, route, result["map_id"], result["show_real_map"]
+    )
+    _render_downloads(course, route, fmap, line)
     st_folium(fmap, width=None, height=650, returned_objects=[])
 
     _render_maprun_comparison(course, result)
