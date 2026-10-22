@@ -479,7 +479,8 @@ def _render_comparison_map(
         ),
         export.route_layer(
             course, solver_route, solver_line, export.SOLVER_RGB,
-            label=f"Solver at the same distance: {solver_route.points} pts",
+            label=f"Solver at the same distance: {solver_route.points} pts"
+                  + ("" if result["routed"] else " (approximate distances)"),
         ),
     ]
     _render_downloads(
@@ -599,6 +600,29 @@ def main() -> None:
     else:
         map_id_input = selected
 
+    # Routing lives outside the form so it takes effect as soon as it's
+    # changed. Inside a form, a ticked box does nothing until Solve is
+    # pressed, so it could look ticked beside results that were solved
+    # without it -- and the MapRun comparison reuses those results.
+    has_ors = bool(os.environ.get("OPENROUTESERVICE_API_KEY"))
+    has_mapbox = bool(os.environ.get("MAPBOX_ACCESS_TOKEN"))
+    col1, col2 = st.columns(2)
+    with col1:
+        routed = st.checkbox(
+            "Real pedestrian routing",
+            value=has_ors or has_mapbox,
+            help="Without it, distances are straight lines scaled up, which "
+                 "flatters routes through areas with few streets.",
+        )
+    with col2:
+        provider_label = st.selectbox(
+            "Provider",
+            ["OpenRouteService", "Mapbox"],
+            index=0 if has_ors or not has_mapbox else 1,
+            disabled=not routed,
+        )
+    provider_key = "mapbox" if provider_label == "Mapbox" else "ors"
+
     with st.form("solve_form"):
         km_text = st.text_input(
             "Distance budget (km, as your GPS watch measures it)",
@@ -617,15 +641,7 @@ def main() -> None:
                      f"{distances.LINE_EFFICIENCY} routed metres per GPS "
                      "metre. Set 1.0 to plan in routed distance.",
             )
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            routed = st.checkbox("Real pedestrian routing", value=False)
-        with col2:
-            provider_label = st.selectbox(
-                "Provider", ["OpenRouteService", "Mapbox"], disabled=not routed
-            )
-        with col3:
-            show_real_map = st.checkbox("Show the real map", value=True)
+        show_real_map = st.checkbox("Show the real map", value=True)
         submitted = st.form_submit_button("Solve", type="primary")
 
     if submitted:
@@ -641,7 +657,6 @@ def main() -> None:
             st.stop()
         _remember_known_map(map_id, course.title)
 
-        provider_key = "mapbox" if provider_label == "Mapbox" else "ors"
         try:
             matrix, warnings, caveat = _matrix(
                 map_id, routed, provider_key, distances.DEFAULT_DETOUR
@@ -671,12 +686,27 @@ def main() -> None:
             "unbounded": budget == math.inf,
             "show_real_map": show_real_map,
             "routed": routed,
+            "provider": provider_key if routed else None,
             "efficiency": efficiency,
         }
 
     result = st.session_state.get("result")
     if not result:
         return
+
+    stale = []
+    if result["map_id"] != map_id_input.strip():
+        stale.append("map")
+    if (routed, provider_key if routed else None) != (
+        result["routed"], result.get("provider")
+    ):
+        stale.append("routing")
+    if stale:
+        st.warning(
+            f"The {' and '.join(stale)} changed since the last Solve. "
+            f"Everything below, including the MapRun comparison, still uses "
+            f"the old settings ({result['caveat']}). Press Solve to update."
+        )
 
     course = result["course"]
     route = result["route"]
@@ -836,6 +866,13 @@ def _render_maprun_comparison(course: oom.Course, result: dict) -> None:
             help=f"≈{solver_route.distance / efficiency / 1000:.2f}km on GPS "
                  f"({round(solver_route.distance)}m routed, line efficiency "
                  f"{efficiency:.3f}), {len(solver_route.controls)} controls",
+        )
+    st.caption(f"Solver distances: {result['caveat']}")
+    if not result["routed"]:
+        st.warning(
+            "This comparison uses approximate distances, which flatter the "
+            "solver. Tick real pedestrian routing and press Solve for a fair "
+            "comparison."
         )
 
     missed_by_solver = sorted(their_controls - our_controls, key=int)
