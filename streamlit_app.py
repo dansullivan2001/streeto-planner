@@ -181,6 +181,40 @@ def _render_image_url(map_id: str) -> str | None:
         return None
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def _render_image(map_id: str) -> bytes:
+    """The real OOM map image itself, for drawing the route onto."""
+    url = _render_image_url(map_id)
+    if url is None:
+        raise LookupError("no real map image for this course")
+    return oom.fetch_render_image(url)
+
+
+@st.cache_data(show_spinner=False, ttl=600, max_entries=20)
+def _map_image(map_id: str, key: tuple, fmt: str, _layers) -> bytes:
+    """Routes drawn on the real printed map, as PNG or PDF bytes.
+
+    ``key`` identifies what ``_layers`` (export.MapLayer, unhashed -- hence
+    the underscore) draws: each route's label, stops and line.
+    """
+    course = _load_course(map_id)
+    boundary = distances.course_boundary(course)
+    if boundary is None:
+        raise LookupError("this course's printed map edge couldn't be confirmed")
+    image = export.route_on_map(_render_image(map_id), boundary, _layers)
+    if fmt == "pdf":
+        return export.image_pdf(image, title=course.title)
+    return export.image_png(image)
+
+
+def _layer_key(layers) -> tuple:
+    """A hashable summary of map layers, for caching the image they make."""
+    return tuple(
+        (layer.label, tuple(c.number for c in layer.stops), tuple(layer.line))
+        for layer in layers
+    )
+
+
 @st.cache_data(show_spinner="Computing distances...", ttl=600)
 def _matrix(map_id: str, routed: bool, provider: str, detour: float):
     course = _load_course(map_id)
@@ -392,8 +426,8 @@ def _render_comparison_map(
     punch order routed control to control: where they went, not the exact
     way they ran between controls.
     """
-    by_number = {c.number for c in course.controls}
-    runner_visits = [v for v in runner.visits if v in by_number]
+    control_numbers = {c.number for c in course.controls}
+    runner_visits = [v for v in runner.visits if v in control_numbers]
     if not runner_visits:
         st.info("None of this runner's punches match the course's controls.")
         return
@@ -401,12 +435,12 @@ def _render_comparison_map(
     fmap = _base_map(course, result["map_id"], result["show_real_map"])
     theirs = folium.FeatureGroup(name=f"{runner.name} (punch order)")
     ours = folium.FeatureGroup(name="Solver at the same distance")
-    _, solver_geometry = _draw_route(
+    solver_line, solver_geometry = _draw_route(
         ours, course, result["map_id"],
         [c.number for c in solver_route.controls], SOLVER_COLOUR,
         tooltip="Solver",
     )
-    _, runner_geometry = _draw_route(
+    runner_line, runner_geometry = _draw_route(
         theirs, course, result["map_id"], runner_visits, RUNNER_COLOUR,
         tooltip=runner.name,
     )
@@ -428,38 +462,113 @@ def _render_comparison_map(
             f"Their punch order is {routed:.2f} km by the shortest walking "
             f"route; their GPS recorded {runner.distance_km:.2f} km."
         )
+    by_control = {c.number: c for c in course.controls}
+    runner_stops = [
+        course.start_finish, *(by_control[n] for n in runner_visits),
+        course.start_finish,
+    ]
+    layers = [
+        export.MapLayer(
+            runner_stops, runner_line, export.RUNNER_RGB,
+            label=f"{runner.name}: {runner.gross_score} pts, "
+                  f"{runner.distance_km:.1f} km GPS (punch order)",
+            # Wider and underneath, so shared streets show both routes.
+            width_mm=2.4, alpha=140,
+        ),
+        export.route_layer(
+            course, solver_route, solver_line, export.SOLVER_RGB,
+            label=f"Solver at the same distance: {solver_route.points} pts",
+        ),
+    ]
+    _render_downloads(
+        result["map_id"], course, fmap,
+        stem=export.file_stem(course, "vs", runner.name),
+        layers=layers,
+        key="comparison",
+    )
     st_folium(
         fmap, width=None, height=650, returned_objects=[], key="comparison_map"
     )
 
 
 def _render_downloads(
+    map_id: str,
     course: oom.Course,
-    route,
     fmap: folium.Map,
-    line: list[tuple[float, float]],
+    stem: str,
+    layers: list,
+    key: str,
+    gpx: str | None = None,
 ) -> None:
-    """Buttons to save the route for sharing or loading onto a watch."""
-    stem = export.file_stem(course, route)
-    col1, col2 = st.columns(2)
-    with col1:
+    """Export buttons for a map: HTML, the real map as PNG/PDF, maybe GPX.
+
+    ``key`` keeps each map's buttons distinct, since the labels repeat.
+    """
+    # The PNG/PDF need OOM's real map image, which takes several seconds to
+    # render, so they're only built when clicked (Streamlit runs a callable
+    # `data` then, on another thread).
+    has_real_map = (
+        distances.course_boundary(course) is not None
+        and _render_image_url(map_id) is not None
+    )
+    layer_key = _layer_key(layers)
+
+    def image(fmt: str):
+        return lambda: _map_image(map_id, layer_key, fmt, layers)
+
+    what = "Your route" if len(layers) == 1 else "Both routes"
+    image_help = (
+        f"{what} drawn on the real printed map. Takes a few seconds."
+        if has_real_map
+        else "Needs the real printed map, which isn't available for this course."
+    )
+    st.write("**Export**")
+    columns = iter(st.columns(4))
+    with next(columns):
         st.download_button(
-            "Download map (HTML)",
+            "Interactive map (HTML)",
             # Render a copy: rendering adds to the map's script, and the
             # live map still has to go through st_folium afterwards.
             data=copy.deepcopy(fmap).get_root().render(),
             file_name=f"{stem}.html",
             mime="text/html",
             help="A standalone interactive map anyone can open in a browser.",
+            on_click="ignore",
+            key=f"{key}_html",
         )
-    with col2:
+    if gpx is not None:
+        with next(columns):
+            st.download_button(
+                "Route for GPS (GPX)",
+                data=gpx,
+                file_name=f"{stem}.gpx",
+                mime="application/gpx+xml",
+                help="For a watch, Strava, OS Maps etc. Controls are "
+                     "waypoints, numbered in visit order.",
+                on_click="ignore",
+                key=f"{key}_gpx",
+            )
+    with next(columns):
         st.download_button(
-            "Download route (GPX)",
-            data=export.route_gpx(course, route, line),
-            file_name=f"{stem}.gpx",
-            mime="application/gpx+xml",
-            help="For a watch, Strava, OS Maps etc. Controls are waypoints, "
-                 "numbered in visit order.",
+            "Map image (PNG)",
+            data=image("png"),
+            file_name=f"{stem}.png",
+            mime="image/png",
+            help=image_help,
+            disabled=not has_real_map,
+            on_click="ignore",
+            key=f"{key}_png",
+        )
+    with next(columns):
+        st.download_button(
+            "Printable map (PDF)",
+            data=image("pdf"),
+            file_name=f"{stem}.pdf",
+            mime="application/pdf",
+            help=image_help + " Prints at the map's own scale.",
+            disabled=not has_real_map,
+            on_click="ignore",
+            key=f"{key}_pdf",
         )
 
 
@@ -623,7 +732,15 @@ def main() -> None:
     fmap, line = _build_map(
         course, route, result["map_id"], result["show_real_map"]
     )
-    _render_downloads(course, route, fmap, line)
+    _render_downloads(
+        result["map_id"], course, fmap,
+        stem=export.file_stem(
+            course, f"{route.points}pts", f"{round(route.distance)}m"
+        ),
+        layers=[export.route_layer(course, route, line)],
+        key="route",
+        gpx=export.route_gpx(course, route, line),
+    )
     st_folium(fmap, width=None, height=650, returned_objects=[], key="route_map")
 
     _render_maprun_comparison(course, result)

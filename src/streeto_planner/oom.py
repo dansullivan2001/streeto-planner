@@ -319,3 +319,16 @@ def render_image_url(map_id: str, timeout: float = 30.0) -> str:
     if not result.get("success"):
         raise LookupError(result.get("message", "map not found"))
     return parse_render_url(map_id, result["data"])
+
+
+def fetch_render_image(url: str, timeout: float = 90.0) -> bytes:
+    """Download OOM's rendered map image (a JPEG; rendering takes ~10s)."""
+    if not url.startswith(RENDER_URL):
+        raise ValueError("not an OOM render URL")
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310
+        content_type = response.headers.get("Content-Type", "")
+        data = response.read()
+    if not content_type.startswith("image/"):
+        raise RuntimeError(f"OOM's renderer returned {content_type or 'no image'}")
+    return data

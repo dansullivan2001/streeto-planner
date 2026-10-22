@@ -10,8 +10,8 @@ requires-python = ">=3.11"
 dependencies = ["python-dotenv>=1.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
-streamlit = ["streamlit>=1.38", "streamlit-folium>=0.23", "folium>=0.17"]
+dev = ["pytest>=8", "ruff>=0.6", "pillow>=10.1"]
+streamlit = ["streamlit>=1.52", "streamlit-folium>=0.23", "folium>=0.17", "pillow>=10.1"]
 
 [project.scripts]
 streeto = "streeto_planner.cli:main"
