@@ -191,7 +191,9 @@ def _render_image(map_id: str) -> bytes:
 
 
 @st.cache_data(show_spinner=False, ttl=600, max_entries=20)
-def _map_image(map_id: str, key: tuple, fmt: str, _layers) -> bytes:
+def _map_image(
+    map_id: str, key: tuple, fmt: str, fade: float, _layers
+) -> bytes:
     """Routes drawn on the real printed map, as PNG or PDF bytes.
 
     ``key`` identifies what ``_layers`` (export.MapLayer, unhashed -- hence
@@ -201,7 +203,9 @@ def _map_image(map_id: str, key: tuple, fmt: str, _layers) -> bytes:
     boundary = distances.course_boundary(course)
     if boundary is None:
         raise LookupError("this course's printed map edge couldn't be confirmed")
-    image = export.route_on_map(_render_image(map_id), boundary, _layers)
+    image = export.route_on_map(
+        _render_image(map_id), boundary, _layers, fade=fade
+    )
     if fmt == "pdf":
         return export.image_pdf(image, title=course.title)
     return export.image_png(image)
@@ -473,7 +477,7 @@ def _render_comparison_map(
             label=f"{runner.name}: {runner.gross_score} pts, "
                   f"{runner.distance_km:.1f} km GPS (punch order)",
             # Wider and underneath, so shared streets show both routes.
-            width_mm=2.4, alpha=140,
+            width_mm=2.6,
         ),
         export.route_layer(
             course, solver_route, solver_line, export.SOLVER_RGB,
@@ -485,6 +489,10 @@ def _render_comparison_map(
         stem=export.file_stem(course, "vs", runner.name),
         layers=layers,
         key="comparison",
+        # Two routes are harder to pick out, and this map is for looking
+        # at rather than running with, so wash the map out a little. The
+        # planned route's export isn't faded: it may be printed to run with.
+        fade=0.3,
     )
     st_folium(
         fmap, width=None, height=650, returned_objects=[], key="comparison_map"
@@ -499,10 +507,13 @@ def _render_downloads(
     layers: list,
     key: str,
     gpx: str | None = None,
+    fade: float = 0.0,
 ) -> None:
     """Export buttons for a map: HTML, the real map as PNG/PDF, maybe GPX.
 
     ``key`` keeps each map's buttons distinct, since the labels repeat.
+    ``fade`` washes out the printed map in the PNG/PDF (see
+    export.route_on_map).
     """
     # The PNG/PDF need OOM's real map image, which takes several seconds to
     # render, so they're only built when clicked (Streamlit runs a callable
@@ -514,7 +525,7 @@ def _render_downloads(
     layer_key = _layer_key(layers)
 
     def image(fmt: str):
-        return lambda: _map_image(map_id, layer_key, fmt, layers)
+        return lambda: _map_image(map_id, layer_key, fmt, fade, layers)
 
     what = "Your route" if len(layers) == 1 else "Both routes"
     image_help = (

@@ -95,10 +95,12 @@ def file_stem(course: Course, *parts: str) -> str:
 #: course: 1753 x 1240 px), so saving a PDF at it prints at the true scale.
 RENDER_DPI = 150
 
-SOLVER_RGB = (220, 20, 20)
-RUNNER_RGB = (37, 99, 201)
-ROUTE_ALPHA = 150  # see-through, so the map still reads underneath
+# Solid colours, each with a thin white outline: see-through lines blend
+# into the black streets and orange areas and turn muddy where they cross.
+SOLVER_RGB = (225, 0, 0)
+RUNNER_RGB = (0, 90, 220)
 ROUTE_WIDTH_MM = 1.0
+ROUTE_OUTLINE_MM = 0.35
 BADGE_RADIUS_MM = 2.7
 #: How far a visit-order badge sits from its control's centre: just outside
 #: OOM's printed control circle (about 6 mm across).
@@ -118,7 +120,6 @@ class MapLayer:
     #: Draw an underneath route wider, so where two share a street the top
     #: one runs down the middle of it and both stay visible.
     width_mm: float = ROUTE_WIDTH_MM
-    alpha: int = ROUTE_ALPHA
 
 
 def route_layer(
@@ -223,35 +224,43 @@ def route_on_map(
     image_bytes: bytes,
     boundary: Sequence[tuple[float, float]],
     layers: Sequence[MapLayer],
+    fade: float = 0.0,
 ):
     """The real printed map with routes and their visit order drawn on top.
 
-    With more than one labelled route, a legend says which colour is which.
-    Returns a Pillow image the same size as the original, so it still
-    prints at the map's own scale.
+    ``fade`` (0 to 1) washes the map out towards white so the routes stand
+    out more. With more than one labelled route, a legend says which colour
+    is which. Returns a Pillow image the same size as the original, so it
+    still prints at the map's own scale.
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    project = image_projection(boundary, base.size)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if fade > 0:
+        image = Image.blend(image, Image.new("RGB", image.size, "white"), fade)
+    project = image_projection(boundary, image.size)
     px_per_mm = RENDER_DPI / 25.4
 
-    # Layers are drawn in order, each see-through on its own overlay.
-    image = base
-    paths = []
-    for layer in layers:
-        path = [project(lat, lon) for lat, lon in layer.line]
-        paths.append(path)
-        if len(path) < 2:
-            continue
-        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        ImageDraw.Draw(overlay).line(
-            path, fill=(*layer.colour, layer.alpha),
-            width=max(2, round(layer.width_mm * px_per_mm)), joint="curve",
-        )
-        image = Image.alpha_composite(image, overlay)
-
     draw = ImageDraw.Draw(image)
+    paths = [[project(lat, lon) for lat, lon in layer.line] for layer in layers]
+    drawable = [
+        (path, layer) for path, layer in zip(paths, layers, strict=True)
+        if len(path) >= 2
+    ]
+    # Every outline goes down before any colour, so a later route's outline
+    # never cuts into an earlier one: a shared street shows the lower route
+    # as a band with the upper one down its middle.
+    for path, layer in drawable:
+        draw.line(
+            path, fill="white", joint="curve",
+            width=round((layer.width_mm + 2 * ROUTE_OUTLINE_MM) * px_per_mm),
+        )
+    for path, layer in drawable:
+        draw.line(
+            path, fill=layer.colour, joint="curve",
+            width=max(2, round(layer.width_mm * px_per_mm)),
+        )
+
     radius = BADGE_RADIUS_MM * px_per_mm
     offset = BADGE_OFFSET_MM * px_per_mm
     font = ImageFont.load_default(size=round(radius * 1.25))
@@ -264,7 +273,7 @@ def route_on_map(
             x, y = points[i][0] + dx * offset, points[i][1] + dy * offset
             draw.ellipse(
                 [x - radius, y - radius, x + radius, y + radius],
-                fill=(255, 255, 255, 235), outline=layer.colour,
+                fill="white", outline=layer.colour,
                 width=max(1, round(radius / 5)),
             )
             draw.text((x, y), str(i), fill=layer.colour, font=font, anchor="mm")
@@ -272,7 +281,7 @@ def route_on_map(
     labelled = [layer for layer in layers if layer.label]
     if len(labelled) > 1:
         _draw_legend(draw, image.size, labelled, all_points, px_per_mm, font)
-    return image.convert("RGB")
+    return image
 
 
 def _draw_legend(draw, size, layers, points, px_per_mm, font) -> None:
@@ -286,7 +295,7 @@ def _draw_legend(draw, size, layers, points, px_per_mm, font) -> None:
     x0, y0 = _legend_corner(size, box, inset, points)
     draw.rounded_rectangle(
         [x0, y0, x0 + box[0], y0 + box[1]], radius=pad,
-        fill=(255, 255, 255, 235), outline=(60, 60, 60), width=1,
+        fill="white", outline=(60, 60, 60), width=1,
     )
     for i, layer in enumerate(layers):
         y = y0 + pad + row_h * i + row_h / 2

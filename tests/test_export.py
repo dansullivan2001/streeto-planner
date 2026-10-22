@@ -181,3 +181,20 @@ def test_legend_corner_avoids_the_busy_one() -> None:
     size, box, inset = (1000, 800), (200, 50), (10, 10)
     busy_bottom_left = [(50, 770)] * 5
     assert export._legend_corner(size, box, inset, busy_bottom_left) == (790, 740)
+
+
+def test_fade_washes_the_map_towards_white() -> None:
+    import io
+
+    from PIL import Image
+
+    from streeto_planner.distances import course_boundary
+
+    course = _tilted_course()
+    black = io.BytesIO()
+    Image.new("RGB", (1753, 1240), "black").save(black, format="PNG")
+    image = export.route_on_map(
+        black.getvalue(), course_boundary(course), [], fade=0.3
+    )
+    r, g, b = image.getpixel((5, 5))
+    assert 70 <= r <= 80 and r == g == b
