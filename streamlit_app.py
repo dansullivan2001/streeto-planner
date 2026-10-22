@@ -476,8 +476,6 @@ def _render_comparison_map(
             runner_stops, runner_line, export.RUNNER_RGB,
             label=f"{runner.name}: {runner.gross_score} pts, "
                   f"{runner.distance_km:.1f} km GPS (punch order)",
-            # Wider and underneath, so shared streets show both routes.
-            width_mm=2.6,
         ),
         export.route_layer(
             course, solver_route, solver_line, export.SOLVER_RGB,

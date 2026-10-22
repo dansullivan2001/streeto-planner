@@ -198,3 +198,19 @@ def test_fade_washes_the_map_towards_white() -> None:
     )
     r, g, b = image.getpixel((5, 5))
     assert 70 <= r <= 80 and r == g == b
+
+
+def test_shared_streets_are_drawn_side_by_side_either_way_round() -> None:
+    street = [(0.0, 100.0), (200.0, 100.0)]
+    for second in (street, street[::-1]):  # same way, then opposite ways
+        first, other = export._side_by_side(street, second, 4.0, 6.0)
+        ys = {round(y, 6) for _, y in first}, {round(y, 6) for _, y in other}
+        assert len(ys[0]) == len(ys[1]) == 1
+        (y_first,), (y_other,) = ys
+        assert abs(y_first - y_other) == 8.0  # opposite sides, 2 x 4 apart
+
+
+def test_separate_streets_are_left_alone() -> None:
+    first = [(0.0, 0.0), (200.0, 0.0)]
+    second = [(0.0, 300.0), (200.0, 300.0)]
+    assert export._side_by_side(first, second, 4.0, 6.0) == (first, second)

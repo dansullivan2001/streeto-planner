@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import itertools
 import math
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -107,6 +109,13 @@ BADGE_RADIUS_MM = 2.7
 BADGE_OFFSET_MM = 6.0
 #: Keeps a legend clear of the sheet's edges, title banner and credits.
 LEGEND_INSET_MM = (10.0, 16.0)
+#: Where two routes share a street they're drawn side by side, this far
+#: apart (white showing between them), rather than one on top of the other.
+SIDE_BY_SIDE_GAP_MM = 0.25
+#: How close two routes' lines must be to count as the same street. The
+#: router gives identical geometry for a shared street, so this only needs
+#: to absorb rounding.
+SHARED_STREET_MM = 1.0
 
 
 @dataclass(frozen=True)
@@ -117,8 +126,6 @@ class MapLayer:
     line: Sequence[tuple[float, float]]  # the path itself, as (lat, lon)
     colour: tuple[int, int, int]
     label: str = ""  # shown in a legend when more than one route is drawn
-    #: Draw an underneath route wider, so where two share a street the top
-    #: one runs down the middle of it and both stay visible.
     width_mm: float = ROUTE_WIDTH_MM
 
 
@@ -220,6 +227,110 @@ def _legend_corner(
     return min(candidates, key=covered)
 
 
+def _dedupe(path: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Drop repeated consecutive points, which have no direction."""
+    out: list[tuple[float, float]] = []
+    for point in path:
+        if not out or math.dist(out[-1], point) > 1e-6:
+            out.append(point)
+    return out
+
+
+def _vertex_offsets(path: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Per-point vectors that shift a line sideways by one unit, to its left.
+
+    At a corner the shift follows the bisector, lengthened so both legs end
+    up the same distance from where they were (capped, so a sharp turn
+    doesn't spike outwards).
+    """
+    normals = []
+    for (x0, y0), (x1, y1) in itertools.pairwise(path):
+        length = math.hypot(x1 - x0, y1 - y0)
+        normals.append((-(y1 - y0) / length, (x1 - x0) / length))
+    offsets = []
+    for i in range(len(path)):
+        n_in = normals[i - 1] if i > 0 else None
+        n_out = normals[i] if i < len(normals) else None
+        if n_in is None or n_out is None:
+            offsets.append(n_in or n_out)
+            continue
+        sx, sy = n_in[0] + n_out[0], n_in[1] + n_out[1]
+        length = math.hypot(sx, sy)
+        if length < 1e-6:  # a U-turn: no sensible bisector
+            offsets.append(n_out)
+            continue
+        mx, my = sx / length, sy / length
+        scale = 1 / max(mx * n_out[0] + my * n_out[1], 0.5)
+        offsets.append((mx * scale, my * scale))
+    return offsets
+
+
+class _SegmentGrid:
+    """Finds a line's nearest segment to a point without checking them all."""
+
+    def __init__(self, path: Sequence[tuple[float, float]], cell: float) -> None:
+        self.path, self.cell = path, cell
+        self.cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for i, (a, b) in enumerate(itertools.pairwise(path)):
+            xs = range(int(min(a[0], b[0]) // cell), int(max(a[0], b[0]) // cell) + 1)
+            ys = range(int(min(a[1], b[1]) // cell), int(max(a[1], b[1]) // cell) + 1)
+            for gx, gy in itertools.product(xs, ys):
+                self.cells[gx, gy].append(i)
+
+    def nearest(self, point: tuple[float, float]) -> tuple[float, int, float]:
+        """(distance, segment index, position along it 0-1), within a cell."""
+        px, py = point
+        gx, gy = int(px // self.cell), int(py // self.cell)
+        best = (math.inf, -1, 0.0)
+        for i in {
+            i for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+            for i in self.cells.get((gx + dx, gy + dy), ())
+        }:
+            (x0, y0), (x1, y1) = self.path[i], self.path[i + 1]
+            dx, dy = x1 - x0, y1 - y0
+            along = ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)
+            t = max(0.0, min(1.0, along))
+            distance = math.hypot(px - x0 - t * dx, py - y0 - t * dy)
+            if distance < best[0]:
+                best = (distance, i, t)
+        return best
+
+
+def _side_by_side(
+    first: Sequence[tuple[float, float]],
+    second: Sequence[tuple[float, float]],
+    half_gap: float,
+    near: float,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Two pixel paths, pushed apart wherever they run along the same street.
+
+    The first moves to its own left there and the second to the first's
+    right, so they end up on opposite sides whichever way each was going.
+    Everywhere else both stay where they were.
+    """
+    first, second = _dedupe(first), _dedupe(second)
+    if len(first) < 2 or len(second) < 2:
+        return first, second
+    shifts = list(zip(first, _vertex_offsets(first), strict=True))
+    left = [(x + half_gap * ox, y + half_gap * oy) for (x, y), (ox, oy) in shifts]
+    right = [(x - half_gap * ox, y - half_gap * oy) for (x, y), (ox, oy) in shifts]
+    first_grid, second_grid = _SegmentGrid(first, near), _SegmentGrid(second, near)
+
+    moved_first = [
+        left[i] if second_grid.nearest(p)[0] <= near else p
+        for i, p in enumerate(first)
+    ]
+    moved_second = []
+    for p in second:
+        distance, i, t = first_grid.nearest(p)
+        if distance <= near:
+            (x0, y0), (x1, y1) = right[i], right[i + 1]
+            moved_second.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
+        else:
+            moved_second.append(p)
+    return moved_first, moved_second
+
+
 def route_on_map(
     image_bytes: bytes,
     boundary: Sequence[tuple[float, float]],
@@ -243,13 +354,20 @@ def route_on_map(
 
     draw = ImageDraw.Draw(image)
     paths = [[project(lat, lon) for lat, lon in layer.line] for layer in layers]
+    badge_paths = paths
+    if len(layers) == 2:
+        half_gap = (
+            (layers[0].width_mm + layers[1].width_mm) / 2 + SIDE_BY_SIDE_GAP_MM
+        ) / 2 * px_per_mm
+        paths = list(_side_by_side(
+            paths[0], paths[1], half_gap, SHARED_STREET_MM * px_per_mm
+        ))
     drawable = [
         (path, layer) for path, layer in zip(paths, layers, strict=True)
         if len(path) >= 2
     ]
-    # Every outline goes down before any colour, so a later route's outline
-    # never cuts into an earlier one: a shared street shows the lower route
-    # as a band with the upper one down its middle.
+    # Every outline goes down before any colour, so one route's outline
+    # never cuts into the other's line.
     for path, layer in drawable:
         draw.line(
             path, fill="white", joint="curve",
@@ -264,7 +382,7 @@ def route_on_map(
     radius = BADGE_RADIUS_MM * px_per_mm
     offset = BADGE_OFFSET_MM * px_per_mm
     font = ImageFont.load_default(size=round(radius * 1.25))
-    all_points = [p for path in paths for p in path]
+    all_points = [p for path in badge_paths for p in path]
     for layer in layers:
         points = [project(c.latitude, c.longitude) for c in layer.stops]
         all_points += points
