@@ -228,13 +228,12 @@ def _maprun_results(event_name: str) -> list[maprun.Result]:
     return maprun.fetch_results(event_name)
 
 
-def _build_map(
-    course: oom.Course,
-    route,
-    map_id: str,
-    show_real_map: bool,
-) -> tuple[folium.Map, list[tuple[float, float]]]:
-    """The interactive map, plus the route line drawn on it as (lat, lon)."""
+SOLVER_COLOUR = "#b3541e"
+RUNNER_COLOUR = "#2563c9"
+
+
+def _base_map(course: oom.Course, map_id: str, show_real_map: bool) -> folium.Map:
+    """The course on a map: controls, start, no-access points, printed edge."""
     fmap = folium.Map(
         location=[course.centre_latitude, course.centre_longitude],
         tiles="OpenStreetMap",
@@ -297,29 +296,64 @@ def _build_map(
             tooltip="No access",
         ).add_to(fmap)
 
-    visits = [c.number for c in route.controls]
-    strayed = False
-    geometry_warnings: list[distances.SnapWarning] = []
+    bounds = [[n.latitude, n.longitude] for n in course.nodes]
+    if boundary is not None:
+        bounds += [list(corner) for corner in boundary]
+    fmap.fit_bounds(bounds, padding=(30, 30))
+    return fmap
+
+
+def _draw_route(
+    parent: folium.Map | folium.FeatureGroup,
+    course: oom.Course,
+    map_id: str,
+    visits: list[str],
+    colour: str,
+    tooltip: str | None = None,
+) -> tuple[list[tuple[float, float]], dict | None]:
+    """Draw a route through controls in order, following real paths if possible.
+
+    Returns the line drawn as (lat, lon) pairs, and the routed GeoJSON (None
+    when routing failed and straight legs were drawn instead).
+    """
     try:
         geometry = _geometry(map_id, tuple(visits))
-        folium.GeoJson(
-            geometry, style_function=lambda _: {"color": "#b3541e", "weight": 4}
-        ).add_to(fmap)
-        strayed = distances.route_strays_outside_course(geometry, course)
-        by_number = {c.number: c for c in course.controls}
-        waypoints = [
-            course.start_finish,
-            *(by_number[n] for n in visits),
-            course.start_finish,
-        ]
-        geometry_warnings = distances.geometry_snap_warnings(geometry, waypoints)
-        line = export.geometry_line(geometry)
     except (ValueError, RuntimeError, OSError):
-        line = export.straight_line(course, route)
+        by_number = {c.number: c for c in course.controls}
+        stops = [course.start_finish, *(by_number[n] for n in visits),
+                 course.start_finish]
+        line = [(c.latitude, c.longitude) for c in stops]
         folium.PolyLine(
-            line, color="#b3541e", weight=3, dash_array="6 6"
-        ).add_to(fmap)
+            line, color=colour, weight=3, dash_array="6 6", tooltip=tooltip
+        ).add_to(parent)
+        return line, None
+    folium.GeoJson(
+        geometry,
+        style_function=lambda _, colour=colour: {"color": colour, "weight": 4},
+        tooltip=tooltip,
+    ).add_to(parent)
+    return export.geometry_line(geometry), geometry
+
+
+def _build_map(
+    course: oom.Course,
+    route,
+    map_id: str,
+    show_real_map: bool,
+) -> tuple[folium.Map, list[tuple[float, float]]]:
+    """The interactive map, plus the route line drawn on it as (lat, lon)."""
+    fmap = _base_map(course, map_id, show_real_map)
+    visits = [c.number for c in route.controls]
+    line, geometry = _draw_route(fmap, course, map_id, visits, SOLVER_COLOUR)
+    strayed = False
+    geometry_warnings: list[distances.SnapWarning] = []
+    if geometry is None:
         st.caption("Showing a straight-line approximation (no route geometry).")
+    else:
+        strayed = distances.route_strays_outside_course(geometry, course)
+        geometry_warnings = distances.geometry_snap_warnings(
+            geometry, [course.start_finish, *route.controls, course.start_finish]
+        )
 
     if strayed:
         st.warning(
@@ -334,12 +368,69 @@ def _build_map(
                 f"{w.number} ({w.snapped_distance:.0f}m)" for w in geometry_warnings
             )
         )
-
-    bounds = [[n.latitude, n.longitude] for n in course.nodes]
-    if boundary is not None:
-        bounds += [list(corner) for corner in boundary]
-    fmap.fit_bounds(bounds, padding=(30, 30))
     return fmap, line
+
+
+def _routed_km(geometry: dict | None) -> float | None:
+    """Total length of a routed GeoJSON path in km, if the router reported it."""
+    if geometry is None:
+        return None
+    try:
+        return sum(
+            f["properties"]["summary"]["distance"] for f in geometry["features"]
+        ) / 1000
+    except (KeyError, TypeError):
+        return None
+
+
+def _render_comparison_map(
+    course: oom.Course, result: dict, runner: maprun.Result, solver_route
+) -> None:
+    """The runner's punch order and the solver's route, overlaid on one map.
+
+    MapRun's public API has no GPS tracks, so the runner's line is their
+    punch order routed control to control: where they went, not the exact
+    way they ran between controls.
+    """
+    by_number = {c.number for c in course.controls}
+    runner_visits = [v for v in runner.visits if v in by_number]
+    if not runner_visits:
+        st.info("None of this runner's punches match the course's controls.")
+        return
+
+    fmap = _base_map(course, result["map_id"], result["show_real_map"])
+    theirs = folium.FeatureGroup(name=f"{runner.name} (punch order)")
+    ours = folium.FeatureGroup(name="Solver at the same distance")
+    _, solver_geometry = _draw_route(
+        ours, course, result["map_id"],
+        [c.number for c in solver_route.controls], SOLVER_COLOUR,
+        tooltip="Solver",
+    )
+    _, runner_geometry = _draw_route(
+        theirs, course, result["map_id"], runner_visits, RUNNER_COLOUR,
+        tooltip=runner.name,
+    )
+    ours.add_to(fmap)
+    theirs.add_to(fmap)
+    folium.LayerControl(collapsed=False).add_to(fmap)
+
+    caption = (
+        f'<span style="color:{RUNNER_COLOUR}">━━</span> {runner.name}, '
+        "punch order routed control to control (MapRun has no GPS tracks) · "
+        f'<span style="color:{SOLVER_COLOUR}">━━</span> solver'
+    )
+    if runner_geometry is None or solver_geometry is None:
+        caption += " · dashed lines are straight legs (routing unavailable)"
+    st.markdown(caption, unsafe_allow_html=True)
+    routed = _routed_km(runner_geometry)
+    if routed is not None:
+        st.caption(
+            f"Their punch order is {routed:.2f} km by the shortest walking "
+            f"route; their GPS recorded {runner.distance_km:.2f} km."
+        )
+    st_folium(
+        fmap, width=None, height=650, returned_objects=[], key="comparison_map"
+    )
 
 
 def _render_downloads(
@@ -533,7 +624,7 @@ def main() -> None:
         course, route, result["map_id"], result["show_real_map"]
     )
     _render_downloads(course, route, fmap, line)
-    st_folium(fmap, width=None, height=650, returned_objects=[])
+    st_folium(fmap, width=None, height=650, returned_objects=[], key="route_map")
 
     _render_maprun_comparison(course, result)
 
@@ -635,6 +726,8 @@ def _render_maprun_comparison(course: oom.Course, result: dict) -> None:
         )
     if not missed_by_solver and not missed_by_runner:
         st.write("Same set of controls, just possibly a different order.")
+
+    _render_comparison_map(course, result, chosen, solver_route)
 
 
 main()
