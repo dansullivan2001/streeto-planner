@@ -392,9 +392,22 @@ def main() -> None:
 
     with st.form("solve_form"):
         km_text = st.text_input(
-            "Distance budget (km)",
+            "Distance budget (km, as your GPS watch measures it)",
             placeholder="leave blank for the optimum route through every control",
         )
+        with st.expander("Advanced"):
+            efficiency = st.number_input(
+                "Line efficiency (routed metres per GPS metre)",
+                min_value=0.8,
+                max_value=1.3,
+                value=distances.LINE_EFFICIENCY,
+                step=0.01,
+                format="%.3f",
+                help="Good runners cut corners and use paths the router "
+                     "misses: the top 10% at real MapRun events covered "
+                     f"{distances.LINE_EFFICIENCY} routed metres per GPS "
+                     "metre. Set 1.0 to plan in routed distance.",
+            )
         col1, col2, col3 = st.columns(3)
         with col1:
             routed = st.checkbox("Real pedestrian routing", value=False)
@@ -430,14 +443,14 @@ def main() -> None:
 
         if km_text.strip():
             try:
-                budget = float(km_text) * 1000
+                budget = float(km_text) * 1000 * efficiency
             except ValueError:
                 st.error("Distance budget must be a number.")
                 st.stop()
         else:
             budget = math.inf
 
-        route = solve(course.nodes, matrix, budget, iterations=60, seed=0)
+        route = solve(course.nodes, matrix, budget, seed=0)
 
         st.session_state["result"] = {
             "map_id": map_id,
@@ -449,6 +462,7 @@ def main() -> None:
             "unbounded": budget == math.inf,
             "show_real_map": show_real_map,
             "routed": routed,
+            "efficiency": efficiency,
         }
 
     result = st.session_state.get("result")
@@ -457,6 +471,11 @@ def main() -> None:
 
     course = result["course"]
     route = result["route"]
+    efficiency = result.get("efficiency", 1.0)
+    distance_text = (
+        f"≈{route.distance / efficiency / 1000:.1f} km on GPS "
+        f"({round(route.distance)} m routed)"
+    )
 
     st.subheader(course.title or "(untitled)")
     st.write(f"{course.event_date} · {course.club} · scale 1:{course.scale}")
@@ -464,13 +483,13 @@ def main() -> None:
     if result["unbounded"]:
         st.success(
             f"Optimum route through all {len(course.controls)} controls: "
-            f"{round(route.distance)} m"
+            f"{distance_text}"
         )
     else:
         st.success(
             f"{route.points} / {course.total_points} points "
             f"({100 * route.points / course.total_points:.0f}%), "
-            f"{len(route.controls)} stops, {round(route.distance)} m, "
+            f"{len(route.controls)} stops, {distance_text}, "
             f"gap ≤ {route.gap:.0%}"
         )
     st.caption(result["caveat"])
@@ -574,9 +593,10 @@ def _render_maprun_comparison(course: oom.Course, result: dict) -> None:
         st.info("This result has no usable distance to compare against.")
         return
 
+    efficiency = result.get("efficiency", 1.0)
     solver_route = solve(
-        course.nodes, result["matrix"], chosen.distance_km * 1000,
-        iterations=60, seed=0,
+        course.nodes, result["matrix"], chosen.distance_km * 1000 * efficiency,
+        seed=0,
     )
 
     course_control_numbers = {c.number for c in course.controls}
@@ -596,8 +616,9 @@ def _render_maprun_comparison(course: oom.Course, result: dict) -> None:
             "Solver's score at the same distance",
             solver_route.points,
             delta=solver_route.points - chosen.gross_score,
-            help=f"{round(solver_route.distance)}m, "
-                 f"{len(solver_route.controls)} controls",
+            help=f"≈{solver_route.distance / efficiency / 1000:.2f}km on GPS "
+                 f"({round(solver_route.distance)}m routed, line efficiency "
+                 f"{efficiency:.3f}), {len(solver_route.controls)} controls",
         )
 
     missed_by_solver = sorted(their_controls - our_controls, key=int)

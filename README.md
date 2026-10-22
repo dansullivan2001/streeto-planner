@@ -116,12 +116,24 @@ inner city and 1.47 in the suburbs, and the approximation flatters the solver
 by 5–9% — it picks legs that are cheap in a straight line but blocked by a
 river or a railway. Treat approximate scores as ±10% indicative.
 
-**The solver is a heuristic.** Randomised greedy insertion, 2-opt cleanup,
-restarted. Forty-six controls across eleven budgets solves in under half a
-second of pure Python, which is the main reason a live, in-browser version looks
-practical. Each route reports a `gap` against an upper bound built from which
-controls are reachable out-and-back at all. The bound is loose, especially at
-small budgets, but it is honest: it never claims optimality it has not proven.
+**The solver is a heuristic.** Randomised greedy insertion with 2-opt cleanup,
+restarted, then improved by ruin and recreate: knock a few controls out of the
+best route, refill the slack greedily, keep it if it scores more. Greedy alone
+never gives back a control it has chosen, which costs it most on long routes,
+where the best plan often swaps one cluster for another. Measured on six real
+courses at 6-16 km, the second stage adds about 4% more points (up to 10% on
+long budgets) for about half a second per solve. Each route reports a `gap`
+against an upper bound built from which controls are reachable out-and-back at
+all. The bound is loose, especially at small budgets, but it is honest: it never
+claims optimality it has not proven.
+
+**Budgets are GPS distance.** Routers follow road centrelines; good runners cut
+corners and use crossings and paths the router misses. Replaying real MapRun
+punch orders through routed distances on five courses, the top 10% of finishers
+covered 1.046 routed metres for every metre their GPS recorded. So a budget is
+multiplied by that "line efficiency" before solving, and route distances are
+reported both ways. Set `--efficiency 1.0` (or the app's *Advanced* setting) to
+plan in routed distance instead.
 
 ## Known limits
 

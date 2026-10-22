@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import math
+import random
+
 import pytest
-from conftest import control
+from conftest import METRES_PER_DEGREE_LAT, control
 
 from streeto_planner.distances import approximate_matrix
+from streeto_planner.oom import Control
 from streeto_planner.solve import solve, upper_bound
 
 
@@ -19,6 +23,24 @@ def line_course() -> list:
         control("33", 1500, 30),
         control("44", 2000, 40),
     ]
+
+
+@pytest.fixture
+def scattered_course() -> list:
+    """Start plus thirty controls scattered over a 3 km square, fixed by seed."""
+    rng = random.Random(0)
+    # A degree of longitude is shorter than one of latitude this far north.
+    metres_per_degree_lon = METRES_PER_DEGREE_LAT * math.cos(math.radians(51.3315))
+    nodes = [Control("start_finish", 51.3315, -0.4000, 0)]
+    for i in range(30):
+        points = rng.choice((10, 20, 30, 40, 50))
+        nodes.append(Control(
+            number=f"{points // 10}{i:02d}",
+            latitude=51.3315 + rng.uniform(-1500, 1500) / METRES_PER_DEGREE_LAT,
+            longitude=-0.4000 + rng.uniform(-1500, 1500) / metres_per_degree_lon,
+            points=points,
+        ))
+    return nodes
 
 
 def test_route_starts_and_finishes_at_the_start(line_course) -> None:
@@ -90,3 +112,32 @@ def test_solving_is_deterministic_for_a_seed(line_course) -> None:
     first = solve(line_course, matrix, 3000, seed=7)
     second = solve(line_course, matrix, 3000, seed=7)
     assert [c.number for c in first.controls] == [c.number for c in second.controls]
+
+
+def test_improvement_beats_greedy_alone(scattered_course) -> None:
+    # At 11.5 km on this course the greedy construction stalls at 850 points:
+    # getting more means giving up controls it has already chosen.
+    matrix = approximate_matrix(scattered_course, 1.0)
+    greedy = solve(scattered_course, matrix, 11_500, rounds=0)
+    improved = solve(scattered_course, matrix, 11_500)
+    assert improved.points > greedy.points
+
+
+def test_improvement_never_scores_less_or_breaks_the_budget(scattered_course) -> None:
+    matrix = approximate_matrix(scattered_course, 1.0)
+    for budget in (4000, 7000, 10_000):
+        greedy = solve(scattered_course, matrix, budget, rounds=0)
+        improved = solve(scattered_course, matrix, budget)
+        assert improved.points >= greedy.points
+        assert improved.distance <= budget + 1e-6
+        assert len(improved.controls) == len({c.number for c in improved.controls})
+
+
+def test_an_unlimited_budget_visits_everything_without_a_longer_route(
+    scattered_course,
+) -> None:
+    matrix = approximate_matrix(scattered_course, 1.0)
+    greedy = solve(scattered_course, matrix, math.inf, rounds=0)
+    improved = solve(scattered_course, matrix, math.inf)
+    assert len(improved.controls) == len(scattered_course) - 1
+    assert improved.distance <= greedy.distance + 1e-6

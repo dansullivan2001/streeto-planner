@@ -49,6 +49,16 @@ class SnapWarning:
 MEASURED_DETOUR = {"inner_city": 1.40, "suburban": 1.47}
 DEFAULT_DETOUR = 1.45
 
+#: Routed metres per metre of GPS track, for a runner who takes good lines.
+#: Measured by replaying real MapRun punch orders through routed matrices on
+#: five courses: the top 10% of finishers covered each routed metre in 1/1.046
+#: of a GPS metre, cutting corners and using crossings and paths the router
+#: does not. The mid-pack came out near 1.0 (their GPS also records time spent
+#: lost). Multiply a distance on the watch by this to get a budget in matrix
+#: metres; it applies to approximate matrices too, since those are calibrated
+#: to routed distances.
+LINE_EFFICIENCY = 1.046
+
 #: Approximate matrices flatter the solver: it picks legs that are cheap as the
 #: crow flies but blocked in reality. Measured against real routed answers on
 #: two courses, the scores it reports came out this much too high.

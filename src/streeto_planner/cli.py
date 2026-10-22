@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from streeto_planner import distances, mapid, oom
-from streeto_planner.solve import solve
+from streeto_planner.solve import DEFAULT_ROUNDS, solve
 
 load_dotenv()
 
@@ -76,6 +76,8 @@ def _solve_command(args: argparse.Namespace) -> int:
     print(f"{course.title}: {len(course.controls)} controls, "
           f"{course.total_points} points available")
     print(f"Distances: {caveat}")
+    print(f"  budgets are GPS km, treated as {args.efficiency} x that in "
+          "routed distance (--efficiency)")
     if course.no_access_points:
         note = "" if not args.routed else " (not accounted for with --routed)"
         print(f"  {len(course.no_access_points)} marked no-access point(s){note}")
@@ -89,10 +91,13 @@ def _solve_command(args: argparse.Namespace) -> int:
 
     results = []
     for km in args.km:
-        route = solve(nodes, matrix, km * 1000, args.iterations, args.seed)
+        route = solve(nodes, matrix, km * 1000 * args.efficiency,
+                      args.iterations, args.seed, args.rounds)
         visits = [c.number for c in route.controls]
         results.append({"km": km, "points": route.points,
-                        "distance": round(route.distance), "visits": visits})
+                        "distance": round(route.distance),
+                        "gps_distance": round(route.distance / args.efficiency),
+                        "visits": visits})
         print(f"{km:>4} {route.points:>7} "
               f"{100 * route.points / course.total_points:>4.0f}% "
               f"{len(visits):>6} {route.gap:>5.0%}  {' '.join(visits)}")
@@ -126,7 +131,14 @@ def main(argv: list[str] | None = None) -> int:
                       help="use real pedestrian routing instead of the approximation")
     plan.add_argument("--provider", choices=["ors", "mapbox"], default="ors",
                       help="routing provider to use with --routed (default: ors)")
-    plan.add_argument("--iterations", type=int, default=60)
+    plan.add_argument("--efficiency", type=float, default=distances.LINE_EFFICIENCY,
+                      help="routed metres per GPS metre (default: "
+                           f"{distances.LINE_EFFICIENCY}; 1.0 to plan in "
+                           "routed distance)")
+    plan.add_argument("--iterations", type=int, default=60,
+                      help="greedy restarts that build the starting route")
+    plan.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS,
+                      help="ruin-and-recreate rounds that improve it (0 to skip)")
     plan.add_argument("--seed", type=int, default=0)
     plan.add_argument("--json", type=Path)
     plan.set_defaults(func=_solve_command)
